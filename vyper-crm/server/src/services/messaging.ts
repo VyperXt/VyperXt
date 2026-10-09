@@ -5,11 +5,18 @@ import { getSettings } from "../settings.js";
 import type { IncomingMessage, StatusUpdate } from "../whatsapp/types.js";
 import { scheduleLeadAi } from "./ai-flows.js";
 import { onOutboundSent, stopEnrollments } from "./automation.js";
-import { addActivity, findOrCreateLeadByPhone, getLead, HttpError } from "./leads.js";
+import { addActivity, findOrCreateLeadByContact, getLead, HttpError } from "./leads.js";
 
 export interface SendOptions {
   author: Exclude<MessageAuthor, "lead" | "phone">;
   userId?: number | null;
+  /** Mensagem do lead que esta resposta responde (usado pelo bot) */
+  replyToId?: number | null;
+}
+
+/** Para onde mandar: o telefone ou, para contatos que só têm LID, o próprio LID. */
+export function whatsAppTarget(lead: Pick<Lead, "phone" | "waJid">): string | null {
+  return lead.phone ?? lead.waJid ?? null;
 }
 
 /** Envia uma mensagem de WhatsApp para o lead e registra no histórico. */
@@ -17,7 +24,8 @@ export async function sendToLead(ctx: AppContext, leadId: number, body: string, 
   const text = body.trim();
   if (!text) throw new HttpError(400, "A mensagem está vazia.");
   const lead = await getLead(ctx.db, leadId);
-  if (!lead.phone) throw new HttpError(400, "Este lead não tem telefone de WhatsApp.");
+  const to = whatsAppTarget(lead);
+  if (!to) throw new HttpError(400, "Este lead não tem telefone de WhatsApp.");
   if (lead.optedOut && (opts.author === "bot" || opts.author === "automation")) {
     throw new HttpError(409, "O lead pediu para não receber mensagens automáticas.");
   }
@@ -31,13 +39,14 @@ export async function sendToLead(ctx: AppContext, leadId: number, body: string, 
       body: text,
       status: "pending",
       userId: opts.userId ?? null,
+      replyToId: opts.replyToId ?? null,
       createdAt: ctx.now(),
     })
     .returning();
 
   let saved: Message;
   try {
-    const { externalId } = await ctx.wa.sendText(lead.phone, text);
+    const { externalId } = await ctx.wa.sendText(to, text);
     // Pode ser que o webhook do próprio envio já tenha gravado este id; nesse caso não duplicamos
     const [updated] = await ctx.db
       .update(messages)
@@ -56,10 +65,38 @@ export async function sendToLead(ctx: AppContext, leadId: number, body: string, 
     throw new HttpError(502, `Falha ao enviar pelo WhatsApp: ${(err as Error).message}`);
   }
 
-  await ctx.db.update(leads).set({ lastMessageAt: saved.createdAt, updatedAt: ctx.now() }).where(eq(leads.id, leadId));
+  // GREATEST: se o lead escreveu enquanto o envio acontecia, lastMessageAt não volta para trás
+  // (senão ele sairia de "Aguardando você" mesmo esperando resposta)
+  await ctx.db
+    .update(leads)
+    .set({ lastMessageAt: laterOf(leads.lastMessageAt, saved.createdAt), updatedAt: ctx.now() })
+    .where(eq(leads.id, leadId));
   ctx.events.emit("message.sent", { message: saved, lead: { id: lead.id, name: lead.name, phone: lead.phone } });
   await onOutboundSent(ctx, lead, saved);
   return saved;
+}
+
+/** greatest(coluna, data) no SQL. A data vai como texto ISO (o driver não serializa Date dentro de sql``). */
+function laterOf(column: typeof leads.lastMessageAt, date: Date) {
+  return sql`greatest(${column}, ${date.toISOString()}::timestamptz)`;
+}
+
+/**
+ * Hora de uma mensagem que chegou: a do WhatsApp (nunca no futuro), mas sempre depois da última
+ * mensagem da conversa. Assim webhooks atrasados (CRM fora do ar, reenvio) mantêm o horário real
+ * sem bagunçar a ordem que o bot e a IA leem.
+ */
+async function arrivalTime(ctx: AppContext, leadId: number, sentAt: Date | undefined): Promise<Date> {
+  const now = ctx.now();
+  let at = sentAt && sentAt.getTime() < now.getTime() ? sentAt : now;
+  const [latest] = await ctx.db
+    .select({ createdAt: messages.createdAt })
+    .from(messages)
+    .where(eq(messages.leadId, leadId))
+    .orderBy(desc(messages.createdAt))
+    .limit(1);
+  if (latest && latest.createdAt.getTime() >= at.getTime()) at = new Date(latest.createdAt.getTime() + 1);
+  return at;
 }
 
 function normalizeText(s: string): string {
@@ -88,20 +125,22 @@ export async function handleIncoming(ctx: AppContext, msg: IncomingMessage): Pro
     if (dup) return null;
   }
 
-  // msg.phone já vem normalizado pelo parser do provedor (com DDI)
-  const { lead, created } = await findOrCreateLeadByPhone(ctx, msg.phone, {
-    waName: msg.name ?? null,
-    source: "whatsapp",
-    // Se foi você quem puxou a conversa pelo celular, a IA não assume
-    ...(msg.fromMe ? { chatMode: "human" as const } : {}),
-  });
+  // msg.phone já vem normalizado pelo parser do provedor (com DDI); msg.jid é o LID, quando houver
+  const { lead, created } = await findOrCreateLeadByContact(
+    ctx,
+    { phone: msg.phone, jid: msg.jid },
+    {
+      waName: msg.name ?? null,
+      source: "whatsapp",
+      // Se foi você quem puxou a conversa pelo celular, a IA não assume
+      ...(msg.fromMe ? { chatMode: "human" as const } : {}),
+    },
+  );
   if (!created && msg.name && !msg.fromMe && msg.name !== lead.waName) {
     await db.update(leads).set({ waName: msg.name }).where(eq(leads.id, lead.id));
   }
 
-  // Hora em que o CRM recebeu (não a do celular do lead): mantém a ordem real das mensagens
-  // em relação às respostas do bot, que usam o mesmo relógio.
-  const createdAt = ctx.now();
+  const createdAt = await arrivalTime(ctx, lead.id, msg.timestamp);
 
   if (msg.fromMe) {
     // Mensagem que VOCÊ mandou pelo celular/WhatsApp Web.
@@ -143,12 +182,16 @@ export async function handleIncoming(ctx: AppContext, msg: IncomingMessage): Pro
       .returning();
     if (!saved) return null; // o mesmo webhook chegou duas vezes ao mesmo tempo
     const settings = await getSettings(db);
-    const patch: Partial<typeof leads.$inferInsert> = { lastMessageAt: createdAt, updatedAt: ctx.now() };
-    if (lead.chatMode === "bot" && settings.bot.pauseOnPhoneReply) {
-      patch.chatMode = "human";
-      await addActivity(db, lead.id, "chat_mode", "Você respondeu pelo celular — a IA pausou e virou copiloto");
-    }
-    await db.update(leads).set(patch).where(eq(leads.id, lead.id));
+    const pause = lead.chatMode === "bot" && settings.bot.pauseOnPhoneReply;
+    await db
+      .update(leads)
+      .set({
+        lastMessageAt: laterOf(leads.lastMessageAt, createdAt),
+        updatedAt: ctx.now(),
+        ...(pause ? { chatMode: "human" as const } : {}),
+      })
+      .where(eq(leads.id, lead.id));
+    if (pause) await addActivity(db, lead.id, "chat_mode", "Você respondeu pelo celular — a IA pausou e virou copiloto");
     ctx.events.emit("message.sent", { message: saved!, lead: { id: lead.id, name: lead.name, phone: lead.phone } });
     await onOutboundSent(ctx, lead, saved!);
     return saved!;

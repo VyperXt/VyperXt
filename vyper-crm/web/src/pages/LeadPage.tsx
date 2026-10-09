@@ -61,7 +61,9 @@ export function LeadPage() {
   });
   const saveFields = useMutation({
     mutationFn: (body: Record<string, unknown>) => api<Lead>(`/leads/${id}`, { method: "PATCH", body }),
-    onSuccess: () => {
+    onSuccess: (saved) => {
+      // Põe o lead salvo no cache antes de limpar as edições (senão o valor antigo aparece até recarregar)
+      qc.setQueryData<LeadDetail>(["lead", id], (old) => (old ? { ...old, lead: saved } : old));
       setEdits({});
       invalidate();
       toast({ kind: "success", text: "Lead salvo." });
@@ -142,7 +144,7 @@ export function LeadPage() {
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-lg font-semibold">{leadName(lead)}</h1>
           <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
-            {formatPhone(lead.phone)}
+            {formatPhone(lead.phone) || (lead.waJid && "WhatsApp sem número (LID)")}
             <TemperatureBadge value={lead.temperature} score={lead.score} />
             <Badge className="bg-slate-100 text-slate-600">{SOURCE_LABEL[lead.source] ?? lead.source}</Badge>
             {lead.optedOut && <Badge className="bg-amber-100 text-amber-800">Não quer automações</Badge>}

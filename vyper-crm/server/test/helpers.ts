@@ -89,6 +89,7 @@ async function openTestDatabase() {
 
 export async function setup(env: Record<string, string> = {}) {
   const handle = await openTestDatabase();
+  let closed = false;
   const config = loadConfig({
     JWT_SECRET: "test-secret-1234567890",
     ADMIN_EMAIL: "admin@test.dev",
@@ -154,7 +155,12 @@ export async function setup(env: Record<string, string> = {}) {
     async app() {
       return buildApp(ctx);
     },
-    close: () => handle.close(),
+    // Idempotente: um teste que trocou de ambiente (useEnv) e estourou o tempo não quebra o afterEach
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      await handle.close();
+    },
   };
 }
 

@@ -4,7 +4,7 @@ import { enrollments, leads, scheduledMessages, sequences, type Lead, type Messa
 import { getSettings, type AppSettings } from "../settings.js";
 import { composeFollowup } from "./ai-flows.js";
 import { addActivity, getLead, HttpError } from "./leads.js";
-import { sendToLead } from "./messaging.js";
+import { sendToLead, whatsAppTarget } from "./messaging.js";
 
 const MINUTE = 60_000;
 
@@ -97,10 +97,15 @@ export function renderTemplate(template: string, lead: Lead, settings: AppSettin
     telefone: lead.phone ?? "",
     email: lead.email ?? "",
   };
+  // Variável vazia vira um marcador; só o espaço/vírgula em volta dela é arrumado.
+  // O resto do texto (emoticons, espaços, listas) fica exatamente como você escreveu.
+  const EMPTY = "";
   return template
-    .replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key: string) => vars[key.toLowerCase()] ?? "")
-    .replace(/[ \t]+([,.!?;:])/g, "$1") // "Oi , tudo bem?" → "Oi, tudo bem?"
-    .replace(/[ \t]{2,}/g, " ")
+    .replaceAll(EMPTY, "")
+    .replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key: string) => vars[key.toLowerCase()] || EMPTY)
+    .replace(/^([ \t]*)[ \t]*,?[ \t]*/gm, "$1") // "{{nome}}, tudo bem?" → "tudo bem?"
+    .replace(/[ \t]*,?[ \t]*(?=[ \t]*[,.!?;:])/g, "") // "Oi {{nome}}, tudo" → "Oi, tudo"; "Oi, {{nome}}!" → "Oi!"
+    .replace(/[ \t]*/g, "") // "Oi {{nome}} tudo bem" → "Oi tudo bem"
     .trim();
 }
 
@@ -139,7 +144,7 @@ async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings
 
   if (!s.active) return void (await stop("automação desativada"));
   if (l.optedOut) return void (await stop("lead pediu para sair"));
-  if (!l.phone) return void (await stop("lead sem telefone"));
+  if (!whatsAppTarget(l)) return void (await stop("lead sem telefone"));
   const step = s.steps[e.stepIndex];
   if (!step) {
     await ctx.db.update(enrollments).set({ status: "completed", nextRunAt: null, updatedAt: ctx.now() }).where(eq(enrollments.id, e.id));

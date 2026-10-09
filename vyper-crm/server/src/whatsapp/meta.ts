@@ -101,13 +101,16 @@ export function parseMetaWebhook(payload: AnyRecord): ParsedWebhook {
       const names = new Map<string, string>();
       for (const c of value.contacts ?? []) if (c?.wa_id) names.set(c.wa_id, c.profile?.name);
       for (const m of value.messages ?? []) {
-        // Reações, mensagens apagadas/não suportadas e avisos do sistema não são texto do lead
-        if (["reaction", "unsupported", "system", "ephemeral", "request_welcome"].includes(m.type)) continue;
+        // Reações, mensagens apagadas e avisos do sistema não são texto do lead
+        if (["reaction", "system", "ephemeral", "request_welcome"].includes(m.type)) continue;
         const phone = normalizePhone(m.from, { international: true });
         if (!phone) continue;
         let body = "";
         let mediaType = m.type ?? "text";
-        if (m.type === "text") body = m.text?.body ?? "";
+        // O lead escreveu algo que a API não consegue mostrar (enquete, mensagem de visualização única...):
+        // registramos mesmo assim para você ver que ele respondeu
+        if (m.type === "unsupported") body = "[mensagem não suportada — veja no celular]";
+        else if (m.type === "text") body = m.text?.body ?? "";
         else if (m.type === "button") body = m.button?.text ?? "";
         else if (m.type === "interactive")
           body = m.interactive?.button_reply?.title ?? m.interactive?.list_reply?.title ?? "[interativo]";

@@ -15,6 +15,13 @@
       "when": 1791565558845,
       "tag": "0001_token_version",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791569682203,
+      "tag": "0002_lid_reply_to_br_phones",
+      "breakpoints": true
     }
   ]
 }

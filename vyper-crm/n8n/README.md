@@ -6,7 +6,7 @@ Quatro workflows prontos para importar. Todos foram testados no n8n 2.41 (o mesm
 |---|---|
 | `01-captacao-formulario-e-site.json` | **Captação de leads.** O n8n hospeda um formulário (`/form/contato`) e também recebe `POST` do seu site (`/webhook/lead-site`). O lead vai para o CRM, a IA qualifica e ele recebe uma boas-vindas no WhatsApp. |
 | `02-alertas-de-eventos.json` | **Alertas.** Recebe os eventos do CRM (`/webhook/crm-eventos`) e avisa no Telegram quando um lead fica quente, quando a IA passa a conversa para você e quando chega lead novo. |
-| `03-follow-up-diario-com-ia.json` | **Follow-up diário.** Todo dia às 10h busca leads sem conversa há 48h e manda uma mensagem escrita pela IA com base no histórico. Marca quem recebeu para não repetir. |
+| `03-follow-up-diario-com-ia.json` | **Follow-up diário.** Todo dia às 10h busca leads sem conversa há 48h e manda uma mensagem escrita pela IA com base no histórico. Marca quem recebeu (`follow-up-n8n`) para não repetir; quem foi pulado ou deu erro no envio ganha `follow-up-n8n-pulado` e sai da fila (tire a etiqueta para tentar de novo). |
 | `04-captador-ia-texto.json` | **Captador com IA.** Recebe qualquer texto (`/webhook/captar-texto` com `{ "texto": "..." }`), a IA extrai os dados e cria o lead. Troque o gatilho por Gmail/IMAP para captar de e-mails. |
 
 ## Como importar

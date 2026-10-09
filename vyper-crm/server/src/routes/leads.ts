@@ -12,7 +12,7 @@ import {
   stages,
   users,
 } from "../db/schema.js";
-import { currentUserId, HttpError, idParam, parse } from "../http.js";
+import { currentUserId, HttpError, idParam, parse, requireChanges } from "../http.js";
 import {
   askCopilot,
   extractLeadsFromText,
@@ -22,7 +22,7 @@ import {
 } from "../services/ai-flows.js";
 import { enroll, stopEnrollments } from "../services/automation.js";
 import { addActivity, createLead, getLead, leadInputSchema, updateLead } from "../services/leads.js";
-import { getConversation, sendToLead } from "../services/messaging.js";
+import { getConversation, sendToLead, whatsAppTarget } from "../services/messaging.js";
 import { getSettings } from "../settings.js";
 
 export const listQuerySchema = z.object({
@@ -172,7 +172,7 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
     const body = parse(z.object({ body: z.string().trim().min(1).max(4096), sendAt: z.coerce.date() }), req.body);
     if (body.sendAt.getTime() < ctx.now().getTime() - 60_000) throw new HttpError(400, "A data precisa estar no futuro.");
     const lead = await getLead(db, id);
-    if (!lead.phone) throw new HttpError(400, "Este lead não tem telefone.");
+    if (!whatsAppTarget(lead)) throw new HttpError(400, "Este lead não tem telefone.");
     const [row] = await db
       .insert(scheduledMessages)
       .values({ leadId: id, body: body.body, sendAt: body.sendAt, createdBy: currentUserId(req) })
@@ -329,7 +329,7 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   app.patch("/api/stages/:id", async (req) => {
-    const body = parse(stageSchema.partial(), req.body);
+    const body = requireChanges(parse(stageSchema.partial(), req.body));
     const [row] = await db.update(stages).set(body).where(eq(stages.id, idParam(req))).returning();
     if (!row) throw new HttpError(404, "Etapa não encontrada.");
     return row;

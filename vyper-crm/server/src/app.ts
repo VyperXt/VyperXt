@@ -49,6 +49,8 @@ export async function buildApp(ctx: AppContext, opts: BuildOptions = {}) {
     const quiet = url.startsWith("/api/webhooks/") || url.startsWith("/api/events") || url.startsWith("/assets/");
     const entry = { method: req.method, url, status: reply.statusCode, ms: Math.round(reply.elapsedTime) };
     if (reply.statusCode >= 500) req.log.error(entry, "requisição");
+    // Webhook recusado (ex.: token antigo depois de trocar WEBHOOK_SECRET): precisa aparecer no log
+    else if (reply.statusCode >= 400 && url.startsWith("/api/webhooks/")) req.log.warn(entry, "webhook recusado");
     else if (!quiet) req.log.info(entry, "requisição");
   });
 

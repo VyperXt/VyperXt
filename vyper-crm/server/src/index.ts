@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import pino from "pino";
 import { createAiProvider } from "./ai/provider.js";
 import { buildApp } from "./app.js";
-import { insecureSettings, loadConfig } from "./config.js";
+import { insecureSettings, loadConfig, weakSettings } from "./config.js";
 import type { AppContext } from "./context.js";
 import { openDatabase } from "./db/client.js";
 import { EventBus } from "./lib/events.js";
@@ -18,16 +18,17 @@ const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
 // Em produção, não sobe com os segredos de exemplo do .env.example
 const insecure = insecureSettings(config);
 if (insecure.length) {
-  const msg =
-    `Troque estes valores no .env (estão vazios ou com o texto de exemplo): ${insecure.join(", ")}. Gere segredos com: openssl rand -hex 32` +
-    (insecure.includes("POSTGRES_PASSWORD")
-      ? ". Atenção: o Postgres guarda a senha da primeira vez que subiu. Numa instalação nova, rode 'docker compose down -v' depois de trocar a senha."
-      : "");
+  const msg = `Troque estes valores no .env (estão vazios ou com o texto de exemplo): ${insecure.join(", ")}. Gere segredos com: openssl rand -hex 32`;
   if (config.NODE_ENV === "production") {
     logger.fatal(msg);
     process.exit(1);
   }
   logger.warn(msg);
+}
+if (weakSettings(config).includes("POSTGRES_PASSWORD")) {
+  logger.warn(
+    "POSTGRES_PASSWORD ainda é o valor de exemplo. Para trocar sem perder dados, veja 'Trocar a senha do banco' no README.",
+  );
 }
 
 const { db, close } = await openDatabase(config.DATABASE_URL);
@@ -62,6 +63,23 @@ logger.info(
   { whatsapp: ctx.wa.name, ai: ctx.ai.enabled ? config.AI_MODEL : "desativada" },
   `CRM rodando em http://localhost:${config.PORT}`,
 );
+
+// Evolution: garante que o webhook aponta para a URL atual (com o WEBHOOK_SECRET atual).
+// Em segundo plano e com novas tentativas, porque a Evolution pode subir depois do CRM.
+void (async () => {
+  if (!ctx.wa.syncWebhook) return;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const result = await ctx.wa.syncWebhook();
+      if (result === "updated") return logger.info("webhook da Evolution atualizado");
+      if (result === "no_instance") return; // ainda não conectou: o Conectar das Configurações grava o webhook
+    } catch (err) {
+      logger.warn({ err: String(err).slice(0, 300) }, "falha ao atualizar o webhook da Evolution");
+    }
+    await new Promise((r) => setTimeout(r, 10_000).unref());
+  }
+  logger.warn("Evolution API inacessível: se trocou WEBHOOK_SECRET ou PUBLIC_URL, clique em Conectar nas Configurações.");
+})();
 
 const shutdown = async () => {
   stopScheduler();

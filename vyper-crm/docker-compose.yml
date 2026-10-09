@@ -73,7 +73,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "5678:5678"
+      # Em produção atrás de um proxy: N8N_PUBLISH=127.0.0.1:5678 no .env
+      - "${N8N_PUBLISH:-5678}:5678"
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -101,7 +102,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      # Em produção atrás de um proxy: CRM_PUBLISH=127.0.0.1:3000 no .env (só o proxy alcança o CRM)
+      - "${CRM_PUBLISH:-3000}:3000"
     env_file: .env
     environment:
       NODE_ENV: production

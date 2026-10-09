@@ -192,6 +192,8 @@ function ChatArea({ leadId }: { leadId: number }) {
     },
   });
   // Trava síncrona: dois Enter seguidos (antes do React redesenhar) não enviam duas vezes
+  // Contatos que só têm LID (sem número) também recebem mensagem: o envio usa o LID
+  const canMessage = Boolean(lead?.phone || lead?.waJid);
   const sendingRef = useRef(false);
   const sendDraft = () => {
     if (!draft.trim() || sendingRef.current) return;
@@ -245,7 +247,7 @@ function ChatArea({ leadId }: { leadId: number }) {
               {leadName(lead)} <ExternalLink className="size-3 text-slate-400" />
             </Link>
             <p className="truncate text-xs text-slate-500">
-              {formatPhone(lead.phone)} {lead.interest && `· ${lead.interest}`}
+              {formatPhone(lead.phone) || (lead.waJid && "WhatsApp sem número (LID)")} {lead.interest && `· ${lead.interest}`}
             </p>
           </div>
           <TemperatureBadge value={lead.temperature} score={lead.score} />
@@ -320,9 +322,9 @@ function ChatArea({ leadId }: { leadId: number }) {
               ref={textRef}
               className="input max-h-40 min-h-[42px] resize-none"
               rows={Math.min(6, Math.max(1, draft.split("\n").length))}
-              placeholder={lead.phone ? "Escreva sua mensagem..." : "Este lead não tem telefone"}
+              placeholder={canMessage ? "Escreva sua mensagem..." : "Este lead não tem telefone"}
               value={draft}
-              disabled={!lead.phone}
+              disabled={!canMessage}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -347,7 +349,7 @@ function ChatArea({ leadId }: { leadId: number }) {
                 variant="secondary"
                 title="Simular: enviar este texto COMO SE FOSSE o lead"
                 aria-label="Simular resposta do lead"
-                disabled={!draft.trim()}
+                disabled={!draft.trim() || !lead.phone}
                 loading={simulate.isPending}
                 onClick={() => simulate.mutate(draft)}
               >

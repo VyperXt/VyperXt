@@ -1,5 +1,8 @@
 export interface IncomingMessage {
-  phone: string;
+  /** Telefone com DDI (só dígitos). null quando o WhatsApp só informa o LID do contato. */
+  phone: string | null;
+  /** Id interno do WhatsApp ("123...@lid"), quando conhecido. Também serve para responder. */
+  jid?: string;
   /** Nome do perfil do WhatsApp */
   name?: string;
   body: string;
@@ -45,6 +48,8 @@ export interface WhatsAppProvider {
   status(): Promise<ConnectionStatus>;
   connect(): Promise<ConnectResult>;
   disconnect(): Promise<void>;
+  /** Só Evolution: regrava o webhook na inicialização (URL/token podem ter mudado). */
+  syncWebhook?(): Promise<"updated" | "no_instance" | "unreachable">;
 }
 
 /** Texto amigável para mensagens que não são texto puro */

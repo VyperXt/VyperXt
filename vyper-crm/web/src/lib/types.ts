@@ -21,6 +21,8 @@ export interface Lead {
   name: string | null;
   waName: string | null;
   phone: string | null;
+  /** Id interno do WhatsApp (LID) quando o contato não mostra o número */
+  waJid: string | null;
   email: string | null;
   company: string | null;
   source: string;

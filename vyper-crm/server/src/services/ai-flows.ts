@@ -1,6 +1,6 @@
-import { desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gte } from "drizzle-orm";
 import type { AppContext } from "../context.js";
-import { copilotInsights, leads, messages, type Lead } from "../db/schema.js";
+import { copilotInsights, leads, messages, type Lead, type Message } from "../db/schema.js";
 import * as P from "../ai/prompts.js";
 import {
   copilotAskSchema,
@@ -50,14 +50,31 @@ export async function processLeadAi(ctx: AppContext, leadId: number): Promise<vo
   }
 }
 
+/**
+ * A última mensagem do lead que ainda está sem resposta (ou undefined).
+ * Qualquer mensagem nossa depois dela conta como resposta, menos a do bot que respondia uma mensagem
+ * anterior (o lead escreveu de novo enquanto o bot enviava; essa nova ainda precisa de resposta).
+ */
+export function unansweredInbound(history: Message[]): Message | undefined {
+  const lastIn = history.findLast((m) => m.direction === "in");
+  if (!lastIn) return undefined;
+  const answered = history.some(
+    (m) =>
+      m.id > lastIn.id &&
+      m.direction === "out" &&
+      !(m.author === "bot" && m.replyToId != null && m.replyToId < lastIn.id),
+  );
+  return answered ? undefined : lastIn;
+}
+
 /** Bot: responde o lead sozinho e, quando necessário, passa a conversa para um humano. */
 export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ sent: boolean; handoff: boolean }> {
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
   const history = await getConversation(ctx, leadId);
-  const last = history.at(-1);
-  // Só responde se a última mensagem for do lead (ninguém respondeu ainda)
-  if (!last || last.direction !== "in") return { sent: false, handoff: false };
+  // Só responde se a última mensagem do lead ainda não tiver resposta
+  const target = unansweredInbound(history);
+  if (!target) return { sent: false, handoff: false };
 
   const output = await ctx.ai.generate({
     task: "reply",
@@ -67,20 +84,22 @@ export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ s
     effort: "low",
   });
 
-  // Enquanto a IA pensava: chegou mensagem nova ou alguém assumiu a conversa? Então descarta.
-  const [newest] = await ctx.db
-    .select({ id: messages.id })
+  // Enquanto a IA pensava: o lead mandou outra mensagem (a próxima rodada responde tudo junto),
+  // alguém respondeu ou assumiu a conversa? Então descarta.
+  const since = await ctx.db
+    .select()
     .from(messages)
-    .where(eq(messages.leadId, leadId))
-    .orderBy(desc(messages.id))
-    .limit(1);
+    .where(and(eq(messages.leadId, leadId), gte(messages.id, target.id)))
+    .orderBy(asc(messages.id));
   const current = await getLead(ctx.db, leadId);
-  if (newest?.id !== last.id || current.chatMode !== "bot" || current.optedOut) return { sent: false, handoff: false };
+  if (unansweredInbound(since)?.id !== target.id || current.chatMode !== "bot" || current.optedOut) {
+    return { sent: false, handoff: false };
+  }
 
   let sent = false;
   if (output.reply.trim()) {
     try {
-      await sendToLead(ctx, leadId, output.reply, { author: "bot" });
+      await sendToLead(ctx, leadId, output.reply, { author: "bot", replyToId: target.id });
       sent = true;
     } catch (err) {
       // A falha fica registrada na conversa; a transferência para humano abaixo acontece mesmo assim

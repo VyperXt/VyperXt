@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, lt, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, or, sql, type SQL } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
@@ -8,7 +8,7 @@ import { asPhoneInput, normalizePhone } from "../lib/phone.js";
 import { safeEqual } from "../lib/password.js";
 import { composeFollowup, extractLeadsFromText, runQualification } from "../services/ai-flows.js";
 import { enroll, renderTemplate } from "../services/automation.js";
-import { addActivity, createLead, getLead, leadInputSchema, updateLead } from "../services/leads.js";
+import { addActivity, createLead, findLeadByPhone, getLead, leadInputSchema, updateLead } from "../services/leads.js";
 import { sendToLead } from "../services/messaging.js";
 import { getSettings } from "../settings.js";
 import { leadFilters, listQuerySchema } from "./leads.js";
@@ -67,7 +67,7 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
     const stageId = (await stageIdByName(ctx, body.stage)) ?? input.stageId ?? undefined;
 
     let existing: Lead | undefined;
-    if (phone) [existing] = await db.select().from(leads).where(eq(leads.phone, phone));
+    if (phone) existing = await findLeadByPhone(db, phone);
     if (!existing && input.email) [existing] = await db.select().from(leads).where(eq(leads.email, input.email.toLowerCase()));
 
     let lead: Lead;
@@ -120,7 +120,8 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
         unansweredHours: z.coerce.number().positive().optional(),
         updatedSince: z.coerce.date().optional(),
         // Ignora leads com esta etiqueta (ex.: quem já recebeu o follow-up do n8n)
-        withoutTag: z.string().trim().min(1).max(50).optional(),
+        // Uma ou mais tags separadas por vírgula: só leads que não têm nenhuma delas
+        withoutTag: z.string().trim().min(1).max(300).optional(),
         // true = só quem pode receber automação: tem WhatsApp, não pediu para sair e está em etapa aberta
         automatable: z
           .enum(["true", "false"])
@@ -141,11 +142,14 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
         and(sql`${leads.lastInboundAt} = ${leads.lastMessageAt}`, lt(leads.lastInboundAt, hoursAgo(q.unansweredHours)))!,
       );
     if (q.updatedSince) where.push(gte(leads.updatedAt, q.updatedSince));
-    if (q.withoutTag) where.push(sql`not (${q.withoutTag} = any(${leads.tags}))`);
+    if (q.withoutTag) {
+      const tags = q.withoutTag.split(",").map((t) => t.trim()).filter(Boolean);
+      for (const tag of tags) where.push(sql`not (${tag} = any(${leads.tags}))`);
+    }
     if (q.automatable) {
       where.push(
         and(
-          isNotNull(leads.phone),
+          or(isNotNull(leads.phone), isNotNull(leads.waJid))!,
           eq(leads.optedOut, false),
           inArray(leads.stageId, db.select({ id: stages.id }).from(stages).where(eq(stages.kind, "open"))),
         )!,

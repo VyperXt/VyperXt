@@ -47,6 +47,8 @@ export const leads = pgTable(
     waName: text("wa_name"),
     // Apenas dígitos, com DDI (ex.: 5511999998888)
     phone: text("phone").unique(),
+    // Id interno do WhatsApp (ex.: 123456789@lid) quando o contato chega sem o número de telefone
+    waJid: text("wa_jid").unique(),
     email: text("email"),
     company: text("company"),
     source: text("source").notNull().default("manual"),
@@ -91,6 +93,8 @@ export const messages = pgTable(
     status: text("status").$type<MessageStatus>().notNull().default("sent"),
     error: text("error"),
     userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    // Respostas do bot: id da última mensagem do lead que a IA considerou ao escrever
+    replyToId: integer("reply_to_id"),
     createdAt: createdAt(),
   },
   (t) => [index("messages_lead_idx").on(t.leadId, t.createdAt)],

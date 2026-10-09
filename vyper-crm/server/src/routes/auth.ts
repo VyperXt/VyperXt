@@ -1,23 +1,53 @@
 import { asc, eq } from "drizzle-orm";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { users } from "../db/schema.js";
 import { claimsOf, currentUserId, HttpError, idParam, parse } from "../http.js";
+import { LoginFailures } from "../lib/login-failures.js";
 import { hashPassword, verifyPassword } from "../lib/password.js";
 
 const publicUser = (u: typeof users.$inferSelect) => ({ id: u.id, name: u.name, email: u.email, role: u.role });
 
+const loginEmail = (body: unknown) =>
+  String((body as { email?: unknown } | null)?.email ?? "")
+    .trim()
+    .toLowerCase();
+
 export async function publicAuthRoutes(app: FastifyInstance, ctx: AppContext) {
+  // Senhas erradas por conta, venham de qualquer IP: segura quem troca de IP a cada tentativa
+  const failures = new LoginFailures({ max: 20, windowMs: 15 * 60_000 });
+
   app.post(
     "/api/auth/login",
-    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
-    async (req) => {
+    {
+      config: {
+        // Limite por IP + e-mail (preHandler: o corpo já foi lido). Atrás de um proxy sem TRUST_PROXY,
+        // todo mundo tem o mesmo IP; com o e-mail na chave, um atacante não bloqueia os outros usuários.
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+          hook: "preHandler",
+          keyGenerator: (req: FastifyRequest) => `${req.ip}|${loginEmail(req.body)}`,
+        },
+      },
+    },
+    async (req, reply) => {
       const body = parse(z.object({ email: z.string().trim().toLowerCase(), password: z.string() }), req.body);
       const [user] = await ctx.db.select().from(users).where(eq(users.email, body.email));
+      const now = ctx.now().getTime();
+      if (user) {
+        const wait = failures.retryAfterSeconds(user.id, now);
+        if (wait > 0) {
+          reply.header("retry-after", String(wait));
+          throw new HttpError(429, `Muitas tentativas erradas para este e-mail. Tente de novo em ${Math.ceil(wait / 60)} min.`);
+        }
+      }
       if (!user || !(await verifyPassword(body.password, user.passwordHash))) {
+        if (user) failures.add(user.id, now);
         throw new HttpError(401, "E-mail ou senha incorretos.");
       }
+      failures.clear(user.id);
       const token = app.jwt.sign(claimsOf(user), { expiresIn: "7d" });
       return { token, user: publicUser(user) };
     },

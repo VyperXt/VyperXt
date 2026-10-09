@@ -30,6 +30,26 @@ function canonicalBrazilianMobile(digits: string): string {
 }
 
 /**
+ * Formas do mesmo número que o WhatsApp pode usar (para achar o lead sem duplicar):
+ * - Brasil: com e sem o 9 do celular (5531999998888 ↔ 553199998888)
+ * - México: 521 + 10 dígitos ↔ 52 + 10 dígitos
+ * - Argentina: 549 + 10 dígitos ↔ 54 + 10 dígitos
+ * O primeiro item é sempre o próprio número.
+ */
+export function phoneVariants(digits: string): string[] {
+  const out = [digits];
+  const br = digits.match(/^55(\d{2})9([6-9]\d{7})$/);
+  if (br) out.push(`55${br[1]}${br[2]}`);
+  const brOld = digits.match(/^55(\d{2})([6-9]\d{7})$/);
+  if (brOld) out.push(`55${brOld[1]}9${brOld[2]}`);
+  const mx = digits.match(/^52(1?)(\d{10})$/);
+  if (mx) out.push(mx[1] ? `52${mx[2]}` : `521${mx[2]}`);
+  const ar = digits.match(/^54(9?)(\d{10})$/);
+  if (ar) out.push(ar[1] ? `54${ar[2]}` : `549${ar[2]}`);
+  return [...new Set(out)];
+}
+
+/**
  * Para repassar um número JÁ normalizado a funções que normalizam de novo (createLead/updateLead):
  * o "+" garante que o DDI não seja confundido com DDD (ex.: +1 415..., +33 6...).
  */

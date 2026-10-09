@@ -16,6 +16,12 @@ export function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T>
   return result.data;
 }
 
+/** PATCH sem nenhum campo conhecido: 400 em vez de um UPDATE vazio (que o banco recusaria com 500). */
+export function requireChanges<T extends object>(body: T): T {
+  if (!Object.values(body).some((v) => v !== undefined)) throw new HttpError(400, "Nada para atualizar.");
+  return body;
+}
+
 export function idParam(req: FastifyRequest): number {
   const id = Number((req.params as { id?: string }).id);
   if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, "ID inválido.");

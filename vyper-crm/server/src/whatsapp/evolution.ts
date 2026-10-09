@@ -76,6 +76,18 @@ export class EvolutionProvider implements WhatsAppProvider {
     }
   }
 
+  private async setWebhook(): Promise<void> {
+    await this.call("POST", `/webhook/set/${this.opts.instance}`, {
+      webhook: {
+        enabled: true,
+        url: this.opts.webhookUrl,
+        byEvents: false,
+        base64: false,
+        events: EVOLUTION_EVENTS,
+      },
+    });
+  }
+
   private async ensureInstance(): Promise<void> {
     const current = await this.status();
     if (current.state === "not_created") {
@@ -86,15 +98,20 @@ export class EvolutionProvider implements WhatsAppProvider {
         groupsIgnore: true,
       });
     }
-    await this.call("POST", `/webhook/set/${this.opts.instance}`, {
-      webhook: {
-        enabled: true,
-        url: this.opts.webhookUrl,
-        byEvents: false,
-        base64: false,
-        events: EVOLUTION_EVENTS,
-      },
-    });
+    await this.setWebhook();
+  }
+
+  /**
+   * Na inicialização: se a instância já existe, grava de novo a URL do webhook.
+   * Sem isso, trocar WEBHOOK_SECRET ou PUBLIC_URL no .env deixaria a Evolution chamando a URL antiga
+   * (e toda mensagem recebida seria recusada) até alguém clicar em Conectar.
+   */
+  async syncWebhook(): Promise<"updated" | "no_instance" | "unreachable"> {
+    const current = await this.status();
+    if (current.state === "not_created") return "no_instance";
+    if (current.state === "error") return "unreachable";
+    await this.setWebhook();
+    return "updated";
   }
 
   async connect(): Promise<ConnectResult> {
@@ -167,25 +184,30 @@ export function parseEvolutionWebhook(payload: AnyRecord): ParsedWebhook {
   if (event === "messages.upsert") {
     for (const data of items) {
       const key = data.key ?? {};
-      let jid: string = key.remoteJid ?? "";
-      if (jid.endsWith("@lid")) jid = key.remoteJidAlt ?? key.senderPn ?? data.senderPn ?? jid;
+      const remote: string = key.remoteJid ?? "";
       // Ignora grupos, status e canais
-      if (!jid || jid.endsWith("@g.us") || jid === "status@broadcast" || jid.endsWith("@newsletter")) continue;
-      // LID sem o número real: o id interno do WhatsApp não é telefone (gravá-lo criaria um lead
-      // com número inválido, para o qual nenhuma resposta chegaria)
-      if (jid.endsWith("@lid")) {
-        (result.skipped ??= []).push(`${key.id ?? "?"}: remetente só com LID (${jid}), sem número de telefone`);
-        continue;
-      }
+      if (!remote || remote.endsWith("@g.us") || remote === "status@broadcast" || remote.endsWith("@newsletter")) continue;
       if (data.messageType === "protocolMessage" || data.message?.protocolMessage) continue;
       if (data.message?.reactionMessage) continue;
-      const phone = normalizePhone(jid);
-      if (!phone) continue;
+      // Contatos com LID: o número real vem em remoteJidAlt/senderPn (quando o WhatsApp informa).
+      // O LID não é telefone; sem o número, guardamos o LID e respondemos por ele.
+      let lid: string | undefined;
+      let pnJid = remote;
+      if (remote.endsWith("@lid")) {
+        lid = remote.replace(/:\d+(?=@)/, "");
+        pnJid =
+          [key.remoteJidAlt, key.senderPn, data.senderPn].find(
+            (j): j is string => typeof j === "string" && j !== "" && !j.endsWith("@lid"),
+          ) ?? "";
+      }
+      const phone = pnJid ? normalizePhone(pnJid, { international: true }) : null;
+      if (!phone && !lid) continue;
       const { body, mediaType } = extractContent(data.message, data.messageType);
       if (!body) continue;
       const ts = Number(data.messageTimestamp);
       result.messages.push({
         phone,
+        ...(lid ? { jid: lid } : {}),
         name: key.fromMe ? undefined : data.pushName || undefined,
         body,
         mediaType,

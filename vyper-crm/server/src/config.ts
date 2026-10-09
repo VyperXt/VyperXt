@@ -84,9 +84,16 @@ export function insecureSettings(config: Config): string[] {
     if (!config.WEBHOOK_SECRET) bad.push("WEBHOOK_SECRET");
   }
   if (config.WHATSAPP_PROVIDER === "meta" && !config.META_APP_SECRET) bad.push("META_APP_SECRET");
-  // No docker-compose a senha do banco vai dentro da DATABASE_URL
-  if (/:troque[^@]*@/i.test(config.DATABASE_URL)) bad.push("POSTGRES_PASSWORD");
   return [...new Set(bad)];
+}
+
+/**
+ * Valores de exemplo que só geram aviso: a senha do banco (no docker-compose ela vai dentro da
+ * DATABASE_URL). A porta do Postgres não é publicada, e trocar a senha de um banco que já tem dados
+ * exige ALTER USER (veja o README), então não impedimos o CRM de subir por causa dela.
+ */
+export function weakSettings(config: Config): string[] {
+  return /:troque[^@]*@/i.test(config.DATABASE_URL) ? ["POSTGRES_PASSWORD"] : [];
 }
 
 /** Senha do admin inicial: só importa na primeira execução (quando ainda não há usuários). */

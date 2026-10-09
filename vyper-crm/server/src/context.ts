@@ -23,4 +23,6 @@ export interface AppContext {
   now: () => Date;
   /** Substitui o atraso de resposta da IA (testes usam 0) */
   aiDelayOverrideMs?: number;
+  /** De quanto em quanto tempo o tempo real (/api/events) confere o login de novo (padrão 15 s) */
+  sessionCheckMs?: number;
 }

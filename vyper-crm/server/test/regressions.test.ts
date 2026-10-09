@@ -1,7 +1,7 @@
 // Testes de regressão para os problemas encontrados na revisão do PR #1.
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { insecureSettings, isInsecureAdminPassword, loadConfig, trustProxyValue } from "../src/config.js";
+import { insecureSettings, isInsecureAdminPassword, loadConfig, trustProxyValue, weakSettings } from "../src/config.js";
 import { enrollments, leads, messages, sequences } from "../src/db/schema.js";
 import { normalizePhone } from "../src/lib/phone.js";
 import { renderTemplate, runSchedulerTick } from "../src/services/automation.js";
@@ -265,13 +265,13 @@ describe("parsers e configuração", () => {
     expect(normalizePhone("+1 415 555 2671")).toBe("14155552671");
   });
 
-  it("C32: remetente só com LID é ignorado (não vira telefone falso)", () => {
+  it("C32: remetente só com LID não vira telefone falso (guardamos o LID à parte)", () => {
     const res = parseEvolutionWebhook({
       event: "messages.upsert",
       data: { key: { remoteJid: "123456789012345@lid", fromMe: false, id: "L1" }, message: { conversation: "oi" } },
     });
-    expect(res.messages).toHaveLength(0);
-    expect(res.skipped?.[0]).toContain("LID");
+    expect(res.messages).toHaveLength(1);
+    expect(res.messages[0]).toMatchObject({ phone: null, jid: "123456789012345@lid", body: "oi" });
   });
 
   it("C33: reação da Meta não vira mensagem do lead", () => {
@@ -300,7 +300,9 @@ describe("parsers e configuração", () => {
     });
     expect(insecureSettings(example).sort()).toEqual(["CRM_API_KEY", "EVOLUTION_API_KEY", "JWT_SECRET", "WEBHOOK_SECRET"]);
     const pg = loadConfig({ JWT_SECRET: "a".repeat(64), DATABASE_URL: "postgres://crm:troque-a-senha-do-banco@postgres:5432/crm" });
-    expect(insecureSettings(pg)).toEqual(["POSTGRES_PASSWORD"]);
+    // Senha do banco de exemplo só gera aviso (instalações com dados precisam de ALTER USER para trocar)
+    expect(insecureSettings(pg)).toEqual([]);
+    expect(weakSettings(pg)).toEqual(["POSTGRES_PASSWORD"]);
     const good = loadConfig({ JWT_SECRET: "a".repeat(64), CRM_API_KEY: "k1", WEBHOOK_SECRET: "w1", WHATSAPP_PROVIDER: "simulator" });
     expect(insecureSettings(good)).toEqual([]);
     expect(isInsecureAdminPassword("troque-esta-senha")).toBe(true);

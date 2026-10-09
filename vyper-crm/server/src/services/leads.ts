@@ -1,10 +1,10 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { isInsecureAdminPassword } from "../config.js";
 import type { AppContext } from "../context.js";
 import type { Db } from "../db/client.js";
 import { activities, leads, sequences, stages, users, type Lead, type Stage } from "../db/schema.js";
-import { normalizePhone } from "../lib/phone.js";
+import { normalizePhone, phoneVariants } from "../lib/phone.js";
 import { hashPassword } from "../lib/password.js";
 import { getSettings } from "../settings.js";
 import { onLeadCreated } from "./automation.js";
@@ -154,7 +154,7 @@ async function insertLead(
   ctx: AppContext,
   input: NewLeadInput,
   phone: string | null,
-  opts: { userId?: number | null },
+  opts: { userId?: number | null; waJid?: string | null },
 ): Promise<Lead | null> {
   await assertReferences(ctx.db, { stageId: input.stageId, ownerId: input.ownerId });
   const settings = await getSettings(ctx.db);
@@ -165,6 +165,7 @@ async function insertLead(
       name: clean(input.name),
       waName: clean(input.waName),
       phone,
+      waJid: opts.waJid ?? null,
       email: clean(input.email)?.toLowerCase() ?? null,
       company: clean(input.company),
       source: input.source || "manual",
@@ -180,7 +181,7 @@ async function insertLead(
       temperature: input.temperature ?? "frio",
       score: input.score ?? 0,
     })
-    .onConflictDoNothing({ target: leads.phone })
+    .onConflictDoNothing() // mesmo telefone ou mesmo LID
     .returning();
   if (!lead) return null;
   await addActivity(ctx.db, lead.id, "created", `Lead criado (origem: ${lead.source})`, undefined, opts.userId);
@@ -201,22 +202,55 @@ export async function createLead(ctx: AppContext, input: NewLeadInput, opts: { u
   return lead;
 }
 
+/** Contato do WhatsApp: telefone (já normalizado) e/ou LID ("123...@lid"). */
+export interface WhatsAppContact {
+  phone: string | null;
+  jid?: string | null;
+}
+
+async function findLeadByContact(db: Db, contact: WhatsAppContact): Promise<Lead | undefined> {
+  if (contact.phone) {
+    const byPhone = await findLeadByPhone(db, contact.phone);
+    if (byPhone) return byPhone;
+  }
+  return contact.jid ? findLeadByJid(db, contact.jid) : undefined;
+}
+
+/** Completa o telefone/LID que faltava no lead (ex.: contato que antes só mandava o LID). */
+async function linkContact(ctx: AppContext, lead: Lead, contact: WhatsAppContact): Promise<Lead> {
+  let current = lead;
+  const fill: Array<Partial<typeof leads.$inferInsert>> = [];
+  if (contact.phone && !lead.phone) fill.push({ phone: contact.phone });
+  if (contact.jid && !lead.waJid) fill.push({ waJid: contact.jid });
+  for (const values of fill) {
+    try {
+      const [updated] = await ctx.db.update(leads).set(values).where(eq(leads.id, lead.id)).returning();
+      if (updated) current = updated;
+    } catch (err) {
+      // Outro lead já tem esse número/LID: mantém os dois como estão
+      ctx.log.warn({ err: String(err), leadId: lead.id }, "não foi possível completar o telefone/LID do lead");
+    }
+  }
+  return current;
+}
+
 /**
- * Usado pelas mensagens do WhatsApp: acha o lead pelo telefone (já normalizado) ou cria.
- * Seguro quando chegam várias mensagens de um número novo ao mesmo tempo.
+ * Usado pelas mensagens do WhatsApp: acha o lead pelo telefone (ou pelo LID) ou cria.
+ * Seguro quando chegam várias mensagens de um contato novo ao mesmo tempo.
  */
-export async function findOrCreateLeadByPhone(
+export async function findOrCreateLeadByContact(
   ctx: AppContext,
-  phone: string,
+  contact: WhatsAppContact,
   input: Omit<NewLeadInput, "phone">,
 ): Promise<{ lead: Lead; created: boolean }> {
-  const found = await findLeadByPhone(ctx.db, phone);
-  if (found) return { lead: found, created: false };
-  const lead = await insertLead(ctx, input, phone, {});
+  if (!contact.phone && !contact.jid) throw new Error("Contato sem telefone e sem LID");
+  const found = await findLeadByContact(ctx.db, contact);
+  if (found) return { lead: await linkContact(ctx, found, contact), created: false };
+  const lead = await insertLead(ctx, input, contact.phone, { waJid: contact.jid ?? null });
   if (lead) return { lead, created: true };
-  const again = await findLeadByPhone(ctx.db, phone);
-  if (!again) throw new Error(`Conflito ao criar lead para ${phone}`);
-  return { lead: again, created: false };
+  const again = await findLeadByContact(ctx.db, contact);
+  if (!again) throw new Error(`Conflito ao criar lead para ${contact.phone ?? contact.jid}`);
+  return { lead: await linkContact(ctx, again, contact), created: false };
 }
 
 export async function getLead(db: Db, id: number): Promise<Lead> {
@@ -238,7 +272,7 @@ export async function updateLead(
   if (patch.phone !== undefined) {
     const phone = parsePhoneInput(patch.phone);
     if (phone && phone !== before.phone) {
-      const [dup] = await ctx.db.select({ id: leads.id }).from(leads).where(eq(leads.phone, phone));
+      const dup = await findLeadByPhone(ctx.db, phone, { excludeId: id });
       if (dup) throw new HttpError(409, `Já existe um lead com este telefone (#${dup.id}).`);
     }
     values.phone = phone;
@@ -293,8 +327,16 @@ export async function updateLead(
   return lead!;
 }
 
-export async function findLeadByPhone(db: Db, phone: string): Promise<Lead | undefined> {
-  const [lead] = await db.select().from(leads).where(eq(leads.phone, phone));
+export async function findLeadByPhone(db: Db, phone: string, opts: { excludeId?: number } = {}): Promise<Lead | undefined> {
+  const variants = phoneVariants(phone);
+  const rows = await db.select().from(leads).where(inArray(leads.phone, variants));
+  const candidates = rows.filter((l) => l.id !== opts.excludeId);
+  // Prefere o número exatamente igual; senão a variante (ex.: o mesmo celular sem o 9)
+  return candidates.find((l) => l.phone === phone) ?? candidates[0];
+}
+
+export async function findLeadByJid(db: Db, jid: string): Promise<Lead | undefined> {
+  const [lead] = await db.select().from(leads).where(eq(leads.waJid, jid));
   return lead;
 }
 

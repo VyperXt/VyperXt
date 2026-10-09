@@ -4,7 +4,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Follow-up diário com IA\n\nBusca leads sem conversa há X horas (só quem tem WhatsApp, não pediu para sair e está em etapa aberta). Para cada um, a **IA escreve uma mensagem personalizada** com base no histórico — e pode decidir **não enviar** se o lead já disse que não tem interesse.\n\nQuem recebeu ganha a etiqueta `follow-up-n8n` e não recebe de novo. Se o envio falhar (ou a IA decidir não mandar), o lead não é marcado e entra na próxima rodada.\n\n💡 Dica: o CRM também tem automações nativas em **Automações**. Use este workflow quando quiser lógica própria.",
+        "content": "## Follow-up diário com IA\n\nBusca leads sem conversa há X horas (só quem tem WhatsApp, não pediu para sair e está em etapa aberta). Para cada um, a **IA escreve uma mensagem personalizada** com base no histórico — e pode decidir **não enviar** se o lead já disse que não tem interesse.\n\nQuem recebeu ganha a etiqueta `follow-up-n8n` e não recebe de novo. Se o envio falhar (número sem WhatsApp, por exemplo) ou a IA decidir não mandar, o lead ganha `follow-up-n8n-pulado` e sai da fila (senão ele ocuparia a lista todo dia). Para tentar de novo, tire a etiqueta no CRM.\n\n💡 Dica: o CRM também tem automações nativas em **Automações**. Use este workflow quando quiser lógica própria.",
         "height": 360,
         "width": 600
       },
@@ -83,7 +83,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ $json.crmUrl }}/api/integrations/leads?automatable=true&withoutTag=follow-up-n8n&inactiveHours={{ $json.horasSemConversa }}&limit=50",
+        "url": "={{ $json.crmUrl }}/api/integrations/leads?automatable=true&withoutTag=follow-up-n8n,follow-up-n8n-pulado&inactiveHours={{ $json.horasSemConversa }}&limit=50",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -130,7 +130,7 @@
           "conditions": [
             {
               "id": "bf68b8ec-1b03-48f2-9bf7-2be861b3d4e0",
-              "leftValue": "={{ ($json.tags || []).includes('follow-up-n8n') }}",
+              "leftValue": "={{ ($json.tags || []).some((t) => t === 'follow-up-n8n' || t === 'follow-up-n8n-pulado') }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -241,6 +241,34 @@
         -100
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $('Configuração').first().json.crmUrl }}/api/integrations/leads/{{ $('Ainda não recebeu?').item.json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Configuração').first().json.crmApiKey }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ addTags: ['follow-up-n8n-pulado'] }) }}"
+      },
+      "id": "5f0c2a8e-7d4b-4e61-9a3f-2c8b1d6e4f70",
+      "name": "Marcar como pulado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        100
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -315,6 +343,13 @@
         [
           {
             "node": "Marcar lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar como pulado",
             "type": "main",
             "index": 0
           }

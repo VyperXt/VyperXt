@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { enrollments, leads, scheduledMessages, sequences } from "../db/schema.js";
-import { HttpError, idParam, parse } from "../http.js";
+import { HttpError, idParam, parse, requireChanges } from "../http.js";
 
 const stepSchema = z.object({
   delayMinutes: z.number().int().min(0).max(60 * 24 * 90),
@@ -51,7 +51,7 @@ export async function automationRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   app.patch("/api/sequences/:id", async (req) => {
-    const body = parse(sequencePatchSchema, req.body);
+    const body = requireChanges(parse(sequencePatchSchema, req.body));
     const [row] = await db.update(sequences).set(body).where(eq(sequences.id, idParam(req))).returning();
     if (!row) throw new HttpError(404, "Automação não encontrada.");
     if (body.active === false) {
