@@ -1,10 +1,10 @@
-import { and, asc, desc, eq, inArray, isNotNull, lt, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, sql, type SQL } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { leads, sequences, stages, type Lead } from "../db/schema.js";
 import { HttpError, idParam, parse } from "../http.js";
-import { normalizePhone } from "../lib/phone.js";
+import { asPhoneInput, normalizePhone } from "../lib/phone.js";
 import { safeEqual } from "../lib/password.js";
 import { composeFollowup, extractLeadsFromText, runQualification } from "../services/ai-flows.js";
 import { enroll, renderTemplate } from "../services/automation.js";
@@ -75,7 +75,7 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
     if (existing) {
       const patch: z.infer<typeof leadInputSchema> = {};
       if (input.name && !existing.name) patch.name = input.name;
-      if (phone && !existing.phone) patch.phone = phone;
+      if (phone && !existing.phone) patch.phone = asPhoneInput(phone);
       if (input.email && !existing.email) patch.email = input.email;
       if (input.company && !existing.company) patch.company = input.company;
       if (input.interest) patch.interest = input.interest;
@@ -88,7 +88,8 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
       lead = await updateLead(ctx, existing.id, patch, { reason: "integração" });
       await addActivity(db, lead.id, "integration", `Lead atualizado via integração (${input.source ?? "n8n"})`);
     } else {
-      lead = await createLead(ctx, { ...input, phone, source: input.source ?? "n8n", stageId });
+      // "+" = número já normalizado (não pode ganhar outro 55 na frente)
+      lead = await createLead(ctx, { ...input, phone: phone ? asPhoneInput(phone) : null, source: input.source ?? "n8n", stageId });
       created = true;
     }
 
@@ -118,6 +119,8 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
         // Leads que mandaram a última mensagem há X horas e ninguém respondeu
         unansweredHours: z.coerce.number().positive().optional(),
         updatedSince: z.coerce.date().optional(),
+        // Ignora leads com esta etiqueta (ex.: quem já recebeu o follow-up do n8n)
+        withoutTag: z.string().trim().min(1).max(50).optional(),
         // true = só quem pode receber automação: tem WhatsApp, não pediu para sair e está em etapa aberta
         automatable: z
           .enum(["true", "false"])
@@ -137,7 +140,8 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
       where.push(
         and(sql`${leads.lastInboundAt} = ${leads.lastMessageAt}`, lt(leads.lastInboundAt, hoursAgo(q.unansweredHours)))!,
       );
-    if (q.updatedSince) where.push(sql`${leads.updatedAt} >= ${q.updatedSince}`);
+    if (q.updatedSince) where.push(gte(leads.updatedAt, q.updatedSince));
+    if (q.withoutTag) where.push(sql`not (${q.withoutTag} = any(${leads.tags}))`);
     if (q.automatable) {
       where.push(
         and(

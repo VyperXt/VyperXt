@@ -101,6 +101,8 @@ export function parseMetaWebhook(payload: AnyRecord): ParsedWebhook {
       const names = new Map<string, string>();
       for (const c of value.contacts ?? []) if (c?.wa_id) names.set(c.wa_id, c.profile?.name);
       for (const m of value.messages ?? []) {
+        // Reações, mensagens apagadas/não suportadas e avisos do sistema não são texto do lead
+        if (["reaction", "unsupported", "system", "ephemeral", "request_welcome"].includes(m.type)) continue;
         const phone = normalizePhone(m.from, { international: true });
         if (!phone) continue;
         let body = "";

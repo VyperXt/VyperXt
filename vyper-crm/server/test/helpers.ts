@@ -61,8 +61,34 @@ export class FakeAi implements AiProvider {
 }
 
 
+let dbCounter = 0;
+
+/**
+ * Banco de cada teste: PGlite em memória (padrão) ou, com TEST_PG_URL definido
+ * (ex.: postgres://postgres@127.0.0.1:5433/postgres), um banco novo num PostgreSQL de verdade.
+ */
+async function openTestDatabase() {
+  const adminUrl = process.env.TEST_PG_URL;
+  if (!adminUrl) return openDatabase("pglite://memory");
+  const postgres = (await import("postgres")).default;
+  const name = `vyper_test_${process.pid}_${++dbCounter}`;
+  const admin = postgres(adminUrl, { max: 1, onnotice: () => {} });
+  await admin.unsafe(`create database ${name}`);
+  const url = new URL(adminUrl);
+  url.pathname = `/${name}`;
+  const handle = await openDatabase(url.toString());
+  return {
+    db: handle.db,
+    close: async () => {
+      await handle.close();
+      await admin.unsafe(`drop database if exists ${name}`);
+      await admin.end();
+    },
+  };
+}
+
 export async function setup(env: Record<string, string> = {}) {
-  const handle = await openDatabase("pglite://memory");
+  const handle = await openTestDatabase();
   const config = loadConfig({
     JWT_SECRET: "test-secret-1234567890",
     ADMIN_EMAIL: "admin@test.dev",

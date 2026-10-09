@@ -21,6 +21,8 @@ export interface ParsedWebhook {
   statuses: StatusUpdate[];
   connection?: { state: string };
   qrCode?: { base64?: string; pairingCode?: string; message?: string };
+  /** Mensagens descartadas e o motivo (vai para o log) */
+  skipped?: string[];
 }
 
 export interface ConnectionStatus {

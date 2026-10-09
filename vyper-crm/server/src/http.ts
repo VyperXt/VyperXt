@@ -1,5 +1,8 @@
+import { eq } from "drizzle-orm";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { z } from "zod";
+import type { AppContext } from "./context.js";
+import { users, type User } from "./db/schema.js";
 import { HttpError } from "./services/leads.js";
 
 export { HttpError };
@@ -25,3 +28,25 @@ export function currentUserId(req: FastifyRequest): number | null {
 }
 
 export type Reply = FastifyReply;
+
+export interface SessionClaims {
+  sub: number;
+  role: "admin" | "agent";
+  name: string;
+  /** versão do token do usuário no momento do login */
+  tv: number;
+}
+
+/**
+ * Confere no banco se o dono do token ainda existe e não trocou a senha depois do login.
+ * O papel (admin/vendedor) vem sempre do banco, nunca do token.
+ */
+export async function sessionUser(ctx: AppContext, claims: Partial<SessionClaims> | undefined): Promise<User> {
+  const [user] = claims?.sub ? await ctx.db.select().from(users).where(eq(users.id, claims.sub)) : [];
+  if (!user || (claims?.tv ?? 0) !== user.tokenVersion) throw new HttpError(401, "Sessão expirada. Faça login novamente.");
+  return user;
+}
+
+export function claimsOf(user: User): SessionClaims {
+  return { sub: user.id, role: user.role, name: user.name, tv: user.tokenVersion };
+}

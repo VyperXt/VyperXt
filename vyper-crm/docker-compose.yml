@@ -38,8 +38,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    # Só nesta máquina: o CRM fala com a Evolution pela rede interna do Docker.
+    # Para abrir o gerenciador de outro computador, use um túnel SSH (ssh -L 8080:localhost:8080 ...).
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       SERVER_URL: http://localhost:8080
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?Defina EVOLUTION_API_KEY no .env}

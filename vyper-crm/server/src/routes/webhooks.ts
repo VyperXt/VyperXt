@@ -18,19 +18,26 @@ async function processParsed(ctx: AppContext, parsed: ParsedWebhook) {
   for (const st of parsed.statuses) await applyStatusUpdate(ctx, st).catch(() => {});
   if (parsed.connection) ctx.events.emit("whatsapp.connection", parsed.connection);
   if (parsed.qrCode) ctx.events.emit("whatsapp.qrcode", parsed.qrCode);
+  if (parsed.skipped?.length) ctx.log.warn({ skipped: parsed.skipped }, "mensagens ignoradas no webhook");
 }
 
-/** Webhooks públicos chamados pelos provedores de WhatsApp. */
+/**
+ * Webhooks públicos chamados pelos provedores de WhatsApp.
+ * Fecham por padrão: só o provedor configurado responde, e sempre com segredo.
+ */
 export async function webhookRoutes(app: FastifyInstance, ctx: AppContext) {
+  const provider = ctx.config.WHATSAPP_PROVIDER;
+
   const checkToken = (req: FastifyRequest) => {
     const secret = ctx.config.WEBHOOK_SECRET;
-    if (!secret) return;
+    if (!secret) throw new HttpError(503, "Defina WEBHOOK_SECRET no .env para receber o webhook da Evolution API.");
     const token = (req.query as { token?: string }).token ?? (req.headers["x-webhook-token"] as string | undefined);
     if (!token || !safeEqual(token, secret)) throw new HttpError(401, "Token do webhook inválido.");
   };
 
   // Evolution API (byEvents=false manda tudo aqui; byEvents=true acrescenta /nome-do-evento)
   const evolutionHandler = async (req: FastifyRequest) => {
+    if (provider !== "evolution") throw new HttpError(404, "Rota não encontrada.");
     checkToken(req);
     await processParsed(ctx, parseEvolutionWebhook(req.body as Record<string, unknown>));
     return { ok: true };
@@ -40,6 +47,7 @@ export async function webhookRoutes(app: FastifyInstance, ctx: AppContext) {
 
   // Meta Cloud API: verificação (GET) e eventos (POST)
   app.get("/api/webhooks/meta", async (req, reply) => {
+    if (provider !== "meta") throw new HttpError(404, "Rota não encontrada.");
     const q = req.query as Record<string, string | undefined>;
     if (
       q["hub.mode"] === "subscribe" &&
@@ -53,11 +61,12 @@ export async function webhookRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   app.post("/api/webhooks/meta", async (req) => {
-    if (ctx.config.META_APP_SECRET) {
-      const raw = (req as FastifyRequest & { rawBody?: string }).rawBody ?? "";
-      const sig = req.headers["x-hub-signature-256"] as string | undefined;
-      if (!verifyMetaSignature(raw, sig, ctx.config.META_APP_SECRET)) throw new HttpError(401, "Assinatura inválida.");
-    }
+    if (provider !== "meta") throw new HttpError(404, "Rota não encontrada.");
+    // Sem o segredo do app não há como saber se o POST veio mesmo da Meta: recusa
+    if (!ctx.config.META_APP_SECRET) throw new HttpError(503, "Defina META_APP_SECRET no .env para receber o webhook da Meta.");
+    const raw = (req as FastifyRequest & { rawBody?: string }).rawBody ?? "";
+    const sig = req.headers["x-hub-signature-256"] as string | undefined;
+    if (!verifyMetaSignature(raw, sig, ctx.config.META_APP_SECRET)) throw new HttpError(401, "Assinatura inválida.");
     await processParsed(ctx, parseMetaWebhook(req.body as Record<string, unknown>));
     return { ok: true };
   });

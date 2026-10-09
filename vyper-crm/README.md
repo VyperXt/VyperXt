@@ -76,7 +76,7 @@ Abra o `.env` e preencha pelo menos:
 
 | Variável | O que é |
 |---|---|
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Seu login no painel |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Seu login no painel (senha com pelo menos 8 caracteres) |
 | `JWT_SECRET` | Um segredo longo e aleatório (`openssl rand -hex 32`) |
 | `ANTHROPIC_API_KEY` | Sua chave da IA ([console.anthropic.com](https://console.anthropic.com)) |
 | `EVOLUTION_API_KEY` | Uma senha qualquer para a Evolution API |
@@ -84,6 +84,8 @@ Abra o `.env` e preencha pelo menos:
 | `CRM_API_KEY` | Uma chave qualquer — o n8n usa para falar com o CRM |
 | `N8N_ENCRYPTION_KEY` | Outra chave aleatória (o n8n criptografa as credenciais com ela) |
 | `POSTGRES_PASSWORD` | Senha do banco |
+
+> Troque **todos** os valores que começam com `troque` **antes do primeiro** `docker compose up` (o banco guarda a senha da primeira vez). No Docker o CRM roda em modo produção e se recusa a subir com os valores de exemplo; o log (`docker compose logs crm`) diz quais faltam.
 
 Depois:
 
@@ -95,7 +97,7 @@ docker compose up -d --build
 |---|---|
 | **CRM (painel)** | http://localhost:3000 |
 | n8n | http://localhost:5678 |
-| Evolution API (gerenciador) | http://localhost:8080/manager |
+| Evolution API (gerenciador) | http://localhost:8080/manager (só na própria máquina) |
 
 Entre no CRM com o e-mail e a senha do `.env` e siga para [Conectar o WhatsApp](#conectar-o-whatsapp).
 
@@ -140,7 +142,7 @@ O CRM cria a instância e configura o webhook sozinho. Mensagens que você manda
 
 Mais estável e oficial, mas exige conta no [Meta for Developers](https://developers.facebook.com/docs/whatsapp/cloud-api/get-started).
 
-1. Preencha `META_ACCESS_TOKEN`, `META_PHONE_NUMBER_ID`, `META_VERIFY_TOKEN` (você inventa) e `META_APP_SECRET`.
+1. Preencha `META_ACCESS_TOKEN`, `META_PHONE_NUMBER_ID`, `META_VERIFY_TOKEN` (você inventa) e `META_APP_SECRET` (obrigatório: sem ele o CRM recusa o webhook, porque não teria como saber se a mensagem veio mesmo da Meta).
 2. No painel da Meta, cadastre o webhook `https://SEU-DOMINIO/api/webhooks/meta` com o mesmo *verify token* e assine o campo **messages**.
 
 > Regra da Meta: fora da janela de 24h desde a última mensagem do lead, só é possível enviar *templates* aprovados. Follow-ups de texto livre depois disso vão falhar (o CRM registra o erro na conversa).
@@ -224,7 +226,7 @@ Eventos: `lead.created`, `lead.stage_changed`, `lead.hot`, `lead.handoff`, `lead
 | Método | Rota | O que faz |
 |---|---|---|
 | `POST` | `/api/integrations/leads` | Cria ou atualiza (por telefone/e-mail). Aceita `name, phone, email, company, interest, notes, tags, stage, value`, além de `message` (texto do formulário), `rawText` (texto solto → **IA extrai os dados**), `qualify: true` (IA dá nota/temperatura), `welcomeMessage` (envia no WhatsApp, com variáveis) e `sequenceId` (inscreve em automação). |
-| `GET` | `/api/integrations/leads` | Lista com filtros: `search, stage, temperature, source, chatMode, inactiveHours, unansweredHours, updatedSince, automatable=true, limit, offset`. |
+| `GET` | `/api/integrations/leads` | Lista com filtros: `search, stage, temperature, source, chatMode, inactiveHours, unansweredHours, updatedSince, automatable=true, withoutTag, limit, offset`. |
 | `GET` | `/api/integrations/leads/:id` | Um lead. |
 | `PATCH` | `/api/integrations/leads/:id` | Atualiza campos, `stage` (nome da etapa) e `addTags`. |
 | `POST` | `/api/integrations/leads/:id/messages` | Envia WhatsApp: `{ "text": "Oi {{primeiro_nome}}!" }` ou `{ "ai": true, "instruction": "lembrar da proposta" }`. |
@@ -260,9 +262,9 @@ O WhatsApp bloqueia números que mandam mensagens em massa para quem não pediu.
 
 1. Uma VPS com Docker (2 GB de RAM já funciona).
 2. Aponte domínios (ex.: `crm.seudominio.com` e `n8n.seudominio.com`) e use um proxy com HTTPS (Caddy, Traefik ou Nginx + Certbot) para as portas 3000 e 5678.
-3. No `.env`: senhas fortes, `N8N_PUBLIC_URL=https://n8n.seudominio.com/`.
+3. No `.env`: senhas fortes, `N8N_PUBLIC_URL=https://n8n.seudominio.com/` e `TRUST_PROXY=1` (o CRM passa a ler o IP real do visitante do proxy, o que mantém o limite de tentativas de login funcionando).
 4. Se usar a API da Meta, o webhook precisa ser `https://crm.seudominio.com/api/webhooks/meta`.
-5. Não exponha as portas 8080 (Evolution) e 5432 (banco) para a internet — remova o `ports` da Evolution no `docker-compose.yml` se não for usar o gerenciador dela.
+5. A Evolution (8080) já fica presa a `127.0.0.1` e o banco (5432) não é publicado. Mantenha assim.
 6. Faça backup do volume `pgdata` (o banco tem CRM, n8n e Evolution).
 
 ---
@@ -305,6 +307,8 @@ Mudou o schema do banco (`server/src/db/schema.ts`)? Gere a migração com `npm 
 
 | Problema | Solução |
 |---|---|
+| CRM não sobe ("Troque estes valores no .env") | Em produção o CRM recusa os valores de exemplo. Troque os itens listados no log e rode `docker compose up -d`. |
+| "Authentication failed" no banco depois de trocar `POSTGRES_PASSWORD` | O Postgres guarda a senha da primeira vez que subiu. Numa instalação nova (sem dados), apague o volume: `docker compose down -v` e suba de novo. Se já tem dados, volte a senha antiga no `.env`. |
 | QR code não aparece | Aguarde alguns segundos (ele chega por webhook). Veja `docker compose logs evolution`. Confira se `EVOLUTION_API_KEY` é a mesma no CRM e na Evolution. |
 | Mensagens do WhatsApp não chegam no CRM | Em **Configurações → WhatsApp**, confira a URL do webhook. No Docker ela deve ser `http://crm:3000/...`. Se o CRM roda fora do Docker, ajuste `PUBLIC_URL` para um endereço que a Evolution alcance. |
 | "IA desativada" | Coloque `ANTHROPIC_API_KEY` no `.env` e reinicie (`docker compose up -d crm`). |

@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../lib/api";
 import { useErrorToast, useStages } from "../lib/app-state";
+import { parseBRL } from "../lib/format";
 import type { Lead } from "../lib/types";
 import { Button, Field, Modal } from "./ui";
 
@@ -10,7 +11,10 @@ export function NewLeadModal({ open, onClose, stageId }: { open: boolean; onClos
   const onError = useErrorToast();
   const stages = useStages();
   const empty = { name: "", phone: "", email: "", company: "", interest: "", value: "", notes: "", stageId: stageId ?? 0 };
+  // Quem usa o modal passa uma key diferente a cada abertura, então o estado sempre começa limpo
   const [f, setF] = useState(empty);
+  const value = parseBRL(f.value);
+  const valueInvalid = Number.isNaN(value);
   const m = useMutation({
     mutationFn: () =>
       api<Lead>("/leads", {
@@ -21,7 +25,7 @@ export function NewLeadModal({ open, onClose, stageId }: { open: boolean; onClos
           company: f.company || null,
           interest: f.interest || null,
           notes: f.notes || null,
-          value: f.value ? Number(f.value.replace(/\./g, "").replace(",", ".")) : null,
+          value,
           stageId: f.stageId || stageId || null,
           chatMode: "human",
         },
@@ -60,8 +64,8 @@ export function NewLeadModal({ open, onClose, stageId }: { open: boolean; onClos
         <Field label="Interesse">
           <input className="input" value={f.interest} onChange={set("interest")} />
         </Field>
-        <Field label="Valor (R$)">
-          <input className="input" inputMode="decimal" value={f.value} onChange={set("value")} />
+        <Field label="Valor (R$)" hint={valueInvalid ? "Valor inválido. Ex.: 1.500,00" : undefined}>
+          <input className="input" inputMode="decimal" placeholder="1.500,00" value={f.value} onChange={set("value")} />
         </Field>
         <Field label="Etapa">
           <select className="input" value={f.stageId || stageId || stages.data?.[0]?.id || ""} onChange={(e) => setF({ ...f, stageId: Number(e.target.value) })}>
@@ -81,7 +85,7 @@ export function NewLeadModal({ open, onClose, stageId }: { open: boolean; onClos
           <Button type="button" variant="secondary" onClick={onClose}>
             Cancelar
           </Button>
-          <Button type="submit" loading={m.isPending}>
+          <Button type="submit" loading={m.isPending} disabled={valueInvalid}>
             Criar lead
           </Button>
         </div>

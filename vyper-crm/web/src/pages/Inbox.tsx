@@ -166,11 +166,13 @@ function ChatArea({ leadId }: { leadId: number }) {
   const detail = useQuery({ queryKey: ["lead", leadId], queryFn: () => api<LeadDetail>(`/leads/${leadId}`) });
   const messages = useQuery({ queryKey: ["messages", leadId], queryFn: () => api<Message[]>(`/leads/${leadId}/messages`) });
   const lead = detail.data?.lead;
+  // Rola para o fim quando chega mensagem nova (o tamanho da lista para de mudar depois de 200)
+  const lastMessageId = messages.data?.at(-1)?.id;
   const isSimulator = settings.data?.system.whatsappProvider === "simulator";
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.data?.length]);
+  }, [lastMessageId]);
 
   useEffect(() => {
     if (lead && lead.unreadCount > 0) {
@@ -189,8 +191,16 @@ function ChatArea({ leadId }: { leadId: number }) {
       qc.invalidateQueries({ queryKey: ["messages", leadId] });
     },
   });
+  // Trava síncrona: dois Enter seguidos (antes do React redesenhar) não enviam duas vezes
+  const sendingRef = useRef(false);
+  const sendDraft = () => {
+    if (!draft.trim() || sendingRef.current) return;
+    sendingRef.current = true;
+    send.mutate(draft, { onSettled: () => (sendingRef.current = false) });
+  };
   const simulate = useMutation({
-    mutationFn: (body: string) => api("/whatsapp/simulate", { body: { phone: lead!.phone, body } }),
+    // "+" = número já com DDI (sem isso, um número estrangeiro ganharia um 55 na frente)
+    mutationFn: (body: string) => api("/whatsapp/simulate", { body: { phone: `+${lead!.phone}`, body } }),
     onSuccess: () => {
       setDraft("");
       qc.invalidateQueries({ queryKey: ["messages", leadId] });
@@ -303,7 +313,7 @@ function ChatArea({ leadId }: { leadId: number }) {
             className="flex items-end gap-2"
             onSubmit={(e) => {
               e.preventDefault();
-              if (draft.trim()) send.mutate(draft);
+              sendDraft();
             }}
           >
             <textarea
@@ -317,7 +327,7 @@ function ChatArea({ leadId }: { leadId: number }) {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (draft.trim()) send.mutate(draft);
+                  sendDraft();
                 }
               }}
             />

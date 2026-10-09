@@ -83,7 +83,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ $json.crmUrl }}/api/integrations/leads?automatable=true&inactiveHours={{ $json.horasSemConversa }}&limit=50",
+        "url": "={{ $json.crmUrl }}/api/integrations/leads?automatable=true&withoutTag=follow-up-n8n&inactiveHours={{ $json.horasSemConversa }}&limit=50",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

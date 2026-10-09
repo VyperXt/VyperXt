@@ -14,7 +14,7 @@ import {
   type ExtractOutput,
   type FollowupOutput,
 } from "../ai/schemas.js";
-import { normalizePhone } from "../lib/phone.js";
+import { asPhoneInput, normalizePhone } from "../lib/phone.js";
 import { getSettings, type AppSettings } from "../settings.js";
 import { addActivity, getLead, HttpError, listStages, stageOf, updateLead } from "./leads.js";
 import { getConversation, sendToLead } from "./messaging.js";
@@ -72,15 +72,20 @@ export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ s
     .select({ id: messages.id })
     .from(messages)
     .where(eq(messages.leadId, leadId))
-    .orderBy(desc(messages.createdAt), desc(messages.id))
+    .orderBy(desc(messages.id))
     .limit(1);
   const current = await getLead(ctx.db, leadId);
   if (newest?.id !== last.id || current.chatMode !== "bot" || current.optedOut) return { sent: false, handoff: false };
 
   let sent = false;
   if (output.reply.trim()) {
-    await sendToLead(ctx, leadId, output.reply, { author: "bot" });
-    sent = true;
+    try {
+      await sendToLead(ctx, leadId, output.reply, { author: "bot" });
+      sent = true;
+    } catch (err) {
+      // A falha fica registrada na conversa; a transferência para humano abaixo acontece mesmo assim
+      ctx.log.warn({ err: String(err), leadId }, "falha ao enviar resposta do bot");
+    }
   }
   if (output.handoff) {
     await updateLead(ctx, leadId, { chatMode: "human" }, { reason: "handoff" });
@@ -226,7 +231,11 @@ export async function extractLeadsFromText(ctx: AppContext, text: string): Promi
     schema: extractSchema,
     effort: "low",
   });
-  return out.leads.map((l) => ({ ...l, phone: l.phone ? (normalizePhone(l.phone) ?? l.phone) : "" }));
+  // Devolve com "+" (ex.: +5511999998888): é exibido assim e, reenviado, não ganha outro 55
+  return out.leads.map((l) => {
+    const phone = l.phone ? normalizePhone(l.phone) : null;
+    return { ...l, phone: phone ? asPhoneInput(phone) : l.phone };
+  });
 }
 
 /** A IA escreve (e decide se vale a pena enviar) um follow-up para o lead. */

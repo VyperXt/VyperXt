@@ -118,7 +118,7 @@ describe("utilitários", () => {
   it("renderTemplate", async () => {
     const settings = await getSettings(env.ctx.db);
     const lead = await createLead(env.ctx, { name: "Carlos Silva", phone: "11922221111", company: "ACME" });
-    expect(renderTemplate("Oi {{primeiro_nome}} da {{empresa}} {{inexistente}}!", lead, settings)).toBe("Oi Carlos da ACME !");
+    expect(renderTemplate("Oi {{primeiro_nome}} da {{empresa}} {{inexistente}}!", lead, settings)).toBe("Oi Carlos da ACME!");
   });
 
   it("isWithinSendWindow (inclusive janelas que viram a noite)", async () => {

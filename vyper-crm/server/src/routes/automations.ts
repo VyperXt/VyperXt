@@ -5,22 +5,29 @@ import type { AppContext } from "../context.js";
 import { enrollments, leads, scheduledMessages, sequences } from "../db/schema.js";
 import { HttpError, idParam, parse } from "../http.js";
 
-export const sequenceSchema = z.object({
+const stepSchema = z.object({
+  delayMinutes: z.number().int().min(0).max(60 * 24 * 90),
+  mode: z.enum(["text", "ai"]),
+  message: z.string().trim().min(1).max(4096),
+});
+
+// Sem .default() aqui: o PATCH usa .partial() e, no Zod 4, um default dentro de partial()
+// preencheria o campo ausente (ex.: ligar/desligar a automação zerava o gatilho para "manual").
+const sequenceFields = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().max(1000).nullish(),
-  active: z.boolean().default(true),
-  trigger: z.enum(["manual", "lead_created", "no_reply"]).default("manual"),
-  stopOnReply: z.boolean().default(true),
-  steps: z
-    .array(
-      z.object({
-        delayMinutes: z.number().int().min(0).max(60 * 24 * 90),
-        mode: z.enum(["text", "ai"]),
-        message: z.string().trim().min(1).max(4096),
-      }),
-    )
-    .max(20),
+  active: z.boolean(),
+  trigger: z.enum(["manual", "lead_created", "no_reply"]),
+  stopOnReply: z.boolean(),
+  steps: z.array(stepSchema).max(20),
 });
+
+export const sequenceSchema = sequenceFields.extend({
+  active: sequenceFields.shape.active.default(true),
+  trigger: sequenceFields.shape.trigger.default("manual"),
+  stopOnReply: sequenceFields.shape.stopOnReply.default(true),
+});
+export const sequencePatchSchema = sequenceFields.partial();
 
 export async function automationRoutes(app: FastifyInstance, ctx: AppContext) {
   const { db } = ctx;
@@ -44,7 +51,7 @@ export async function automationRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   app.patch("/api/sequences/:id", async (req) => {
-    const body = parse(sequenceSchema.partial(), req.body);
+    const body = parse(sequencePatchSchema, req.body);
     const [row] = await db.update(sequences).set(body).where(eq(sequences.id, idParam(req))).returning();
     if (!row) throw new HttpError(404, "Automação não encontrada.");
     if (body.active === false) {

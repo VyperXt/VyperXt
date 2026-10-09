@@ -18,6 +18,15 @@ afterEach(async () => {
 
 const auth = () => ({ authorization: `Bearer ${token}` });
 
+/** Troca o ambiente do teste (ex.: outro provedor de WhatsApp). */
+async function useEnv(extra: Record<string, string>) {
+  await app.close();
+  await env.close();
+  env = await setup(extra);
+  app = await env.app();
+  token = await login(app);
+}
+
 describe("painel (API autenticada)", () => {
   it("exige login", async () => {
     const res = await app.inject({ method: "GET", url: "/api/leads" });
@@ -112,9 +121,12 @@ describe("painel (API autenticada)", () => {
     });
     const ex = await app.inject({ method: "POST", url: "/api/leads/extract", headers: auth(), payload: { text: "Paula da Loja X..." } });
     const found = ex.json().leads;
-    expect(found[0].phone).toBe("5531988881111");
+    // Volta com "+" para não ganhar outro 55 ao ser importado
+    expect(found[0].phone).toBe("+5531988881111");
     const imp = await app.inject({ method: "POST", url: "/api/leads/import", headers: auth(), payload: { leads: found } });
     expect(imp.json()).toMatchObject({ created: 2, errors: [] });
+    const all = (await app.inject({ method: "GET", url: "/api/leads?search=Paula", headers: auth() })).json();
+    expect(all.items[0].phone).toBe("5531988881111");
   });
 
   it("configurações e usuários", async () => {
@@ -262,6 +274,7 @@ describe("webhooks do WhatsApp", () => {
   };
 
   it("Evolution: exige token e cria o lead", async () => {
+    await useEnv({ WHATSAPP_PROVIDER: "evolution" });
     const noToken = await app.inject({ method: "POST", url: "/api/webhooks/evolution", payload: evolutionPayload });
     expect(noToken.statusCode).toBe(401);
     const ok = await app.inject({ method: "POST", url: "/api/webhooks/evolution?token=whsec", payload: evolutionPayload });
@@ -271,7 +284,41 @@ describe("webhooks do WhatsApp", () => {
     expect(leads.items[0]).toMatchObject({ phone: "5511987654321", waName: "Fernanda", source: "whatsapp" });
   });
 
+  it("Evolution sem WEBHOOK_SECRET recusa tudo", async () => {
+    await useEnv({ WHATSAPP_PROVIDER: "evolution", WEBHOOK_SECRET: "" });
+    const res = await app.inject({ method: "POST", url: "/api/webhooks/evolution", payload: evolutionPayload });
+    expect(res.statusCode).toBe(503);
+  });
+
+  it("webhooks de outro provedor ficam desligados (não aceitam mensagens forjadas)", async () => {
+    await useEnv({ WHATSAPP_PROVIDER: "evolution" });
+    const meta = await app.inject({
+      method: "POST",
+      url: "/api/webhooks/meta",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ entry: [] }),
+    });
+    expect(meta.statusCode).toBe(404);
+    const verify = await app.inject({ method: "GET", url: "/api/webhooks/meta?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=1" });
+    expect(verify.statusCode).toBe(404);
+    await useEnv({ WHATSAPP_PROVIDER: "simulator" });
+    const evo = await app.inject({ method: "POST", url: "/api/webhooks/evolution?token=whsec", payload: evolutionPayload });
+    expect(evo.statusCode).toBe(404);
+  });
+
+  it("Meta sem META_APP_SECRET recusa (não dá para conferir a assinatura)", async () => {
+    await useEnv({ WHATSAPP_PROVIDER: "meta", META_APP_SECRET: "" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/webhooks/meta",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ entry: [] }),
+    });
+    expect(res.statusCode).toBe(503);
+  });
+
   it("Meta: verificação do webhook e assinatura", async () => {
+    await useEnv({ WHATSAPP_PROVIDER: "meta" });
     const verify = await app.inject({
       method: "GET",
       url: "/api/webhooks/meta?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=12345",

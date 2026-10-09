@@ -1,12 +1,17 @@
-import { and, asc, eq, inArray, lte } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { AppContext } from "../context.js";
 import { enrollments, leads, scheduledMessages, sequences, type Lead, type Message, type Sequence } from "../db/schema.js";
 import { getSettings, type AppSettings } from "../settings.js";
 import { composeFollowup } from "./ai-flows.js";
-import { addActivity, displayName, getLead, HttpError } from "./leads.js";
+import { addActivity, getLead, HttpError } from "./leads.js";
 import { sendToLead } from "./messaging.js";
 
 const MINUTE = 60_000;
+
+/** Passos reservados há mais de 15 min sem terminar são considerados abandonados. */
+function staleClaimCutoff(ctx: AppContext): Date {
+  return new Date(ctx.now().getTime() - 15 * MINUTE);
+}
 
 /** Coloca o lead numa cadência de follow-up (se já estiver ativo nela, reinicia a contagem). */
 export async function enroll(ctx: AppContext, leadId: number, sequenceId: number, reason = "manual"): Promise<void> {
@@ -81,17 +86,22 @@ export async function onOutboundSent(ctx: AppContext, lead: Lead, message: Messa
 }
 
 export function renderTemplate(template: string, lead: Lead, settings: AppSettings): string {
-  const name = displayName(lead);
+  // Sem nome conhecido, a variável fica vazia (nunca cumprimentamos pelo número de telefone)
+  const name = (lead.name || lead.waName || "").trim();
   const vars: Record<string, string> = {
     nome: name,
-    primeiro_nome: name.split(/\s+/)[0] ?? name,
+    primeiro_nome: name.split(/\s+/)[0] ?? "",
     empresa: lead.company ?? "",
     interesse: lead.interest ?? "nossos serviços",
     empresa_nome: settings.business.name,
     telefone: lead.phone ?? "",
     email: lead.email ?? "",
   };
-  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key: string) => vars[key.toLowerCase()] ?? "");
+  return template
+    .replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key: string) => vars[key.toLowerCase()] ?? "")
+    .replace(/[ \t]+([,.!?;:])/g, "$1") // "Oi , tudo bem?" → "Oi, tudo bem?"
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 function minutesOf(hhmm: string): number {
@@ -136,6 +146,27 @@ async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings
     return;
   }
 
+  // Reserva o passo (nextRunAt = null): evita envio duplo se duas rodadas se sobrepuserem
+  const [claimed] = await ctx.db
+    .update(enrollments)
+    .set({ nextRunAt: null, updatedAt: ctx.now() })
+    .where(
+      and(
+        eq(enrollments.id, e.id),
+        eq(enrollments.status, "active"),
+        eq(enrollments.stepIndex, e.stepIndex),
+        or(isNotNull(enrollments.nextRunAt), lt(enrollments.updatedAt, staleClaimCutoff(ctx))),
+      ),
+    )
+    .returning({ id: enrollments.id });
+  if (!claimed) return;
+
+  // Ainda vale? O lead pode ter respondido (ou alguém falou com ele) enquanto a IA escrevia.
+  const stillDue = async () => {
+    const [cur] = await ctx.db.select().from(enrollments).where(eq(enrollments.id, e.id));
+    return cur?.status === "active" && cur.stepIndex === e.stepIndex && cur.nextRunAt === null;
+  };
+
   try {
     let text = "";
     if (step.mode === "ai") {
@@ -149,6 +180,7 @@ async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings
     } else {
       text = renderTemplate(step.message, l, settings);
     }
+    if (!(await stillDue())) return;
     await sendToLead(ctx, l.id, text, { author: "automation" });
     await addActivity(ctx.db, l.id, "followup_sent", `Follow-up "${s.name}" — passo ${e.stepIndex + 1} enviado`);
   } catch (err) {
@@ -165,7 +197,7 @@ async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings
         ? { stepIndex: nextIndex, nextRunAt: new Date(ctx.now().getTime() + next.delayMinutes * MINUTE), updatedAt: ctx.now() }
         : { stepIndex: nextIndex, status: "completed", nextRunAt: null, updatedAt: ctx.now() },
     )
-    .where(and(eq(enrollments.id, e.id), eq(enrollments.status, "active")));
+    .where(and(eq(enrollments.id, e.id), eq(enrollments.status, "active"), isNull(enrollments.nextRunAt)));
 }
 
 async function runScheduledMessage(ctx: AppContext, id: number): Promise<void> {
@@ -199,7 +231,16 @@ export async function runSchedulerTick(ctx: AppContext): Promise<{ steps: number
   const due = await ctx.db
     .select({ id: enrollments.id })
     .from(enrollments)
-    .where(and(eq(enrollments.status, "active"), lte(enrollments.nextRunAt, now)))
+    .where(
+      and(
+        eq(enrollments.status, "active"),
+        or(
+          lte(enrollments.nextRunAt, now),
+          // reserva abandonada (o processo caiu no meio do envio)
+          and(isNull(enrollments.nextRunAt), lt(enrollments.updatedAt, staleClaimCutoff(ctx))),
+        ),
+      ),
+    )
     .orderBy(asc(enrollments.nextRunAt))
     .limit(50);
   for (const { id } of due) await runEnrollmentStep(ctx, id, settings);

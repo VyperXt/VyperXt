@@ -1,12 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../context.js";
+import { sessionUser, type SessionClaims } from "../http.js";
 
 /** Eventos em tempo real para o painel (Server-Sent Events). O token vai na query porque EventSource não envia headers. */
 export async function eventRoutes(app: FastifyInstance, ctx: AppContext) {
   app.get("/api/events", async (req, reply) => {
     const token = (req.query as { token?: string }).token ?? "";
     try {
-      app.jwt.verify(token);
+      await sessionUser(ctx, app.jwt.verify<SessionClaims>(token));
     } catch {
       return reply.code(401).send({ error: "Token inválido." });
     }

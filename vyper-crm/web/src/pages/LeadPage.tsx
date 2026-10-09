@@ -5,7 +5,7 @@ import { Link, useNavigate, useParams } from "react-router";
 import { Avatar, Badge, Button, Empty, Field, Spinner, TemperatureBadge } from "../components/ui";
 import { api } from "../lib/api";
 import { useErrorToast, useStages, useToast } from "../lib/app-state";
-import { formatDateTime, formatPhone, leadName, SOURCE_LABEL } from "../lib/format";
+import { formatDateTime, formatPhone, leadName, parseBRL, SOURCE_LABEL, toBRLInput } from "../lib/format";
 import type { Lead, LeadDetail, Sequence } from "../lib/types";
 
 type Form = {
@@ -22,13 +22,14 @@ type Form = {
 
 const toForm = (l: Lead): Form => ({
   name: l.name ?? "",
-  phone: l.phone ?? "",
+  // Com "+": o número já tem DDI e não pode ganhar outro 55 se for salvo de novo
+  phone: l.phone ? `+${l.phone}` : "",
   email: l.email ?? "",
   company: l.company ?? "",
   interest: l.interest ?? "",
   budget: l.budget ?? "",
   timeline: l.timeline ?? "",
-  value: l.value != null ? String(l.value) : "",
+  value: toBRLInput(l.value),
   notes: l.notes ?? "",
 });
 
@@ -41,30 +42,36 @@ export function LeadPage() {
   const stages = useStages();
   const q = useQuery({ queryKey: ["lead", id], queryFn: () => api<LeadDetail>(`/leads/${id}`) });
   const sequences = useQuery({ queryKey: ["sequences"], queryFn: () => api<Sequence[]>("/sequences") });
-  const [form, setForm] = useState<Form | null>(null);
+  // Só guarda o que a pessoa editou; o resto vem sempre do lead mais recente
+  // (assim atualizações da IA/n8n aparecem e não são sobrescritas ao salvar)
+  const [edits, setEdits] = useState<Partial<Form>>({});
   const [note, setNote] = useState("");
   const [tag, setTag] = useState("");
   const [seqId, setSeqId] = useState("");
 
   const lead = q.data?.lead;
-  useEffect(() => {
-    if (lead && !form) setForm(toForm(lead));
-  }, [lead, form]);
+  useEffect(() => setEdits({}), [id]);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["lead", id] });
+  // Controles rápidos (etapa, modo, temperatura, etiquetas): não mexem no que está sendo digitado
   const patch = useMutation({
     mutationFn: (body: Record<string, unknown>) => api<Lead>(`/leads/${id}`, { method: "PATCH", body }),
-    onSuccess: (l) => {
+    onSuccess: invalidate,
+    onError,
+  });
+  const saveFields = useMutation({
+    mutationFn: (body: Record<string, unknown>) => api<Lead>(`/leads/${id}`, { method: "PATCH", body }),
+    onSuccess: () => {
+      setEdits({});
       invalidate();
-      setForm(toForm(l));
+      toast({ kind: "success", text: "Lead salvo." });
     },
     onError,
   });
   const qualify = useMutation({
     mutationFn: () => api<Lead>(`/leads/${id}/qualify`, { method: "POST" }),
-    onSuccess: (l) => {
+    onSuccess: () => {
       invalidate();
-      setForm(toForm(l));
       toast({ kind: "success", text: "Ficha atualizada pela IA." });
     },
     onError,
@@ -105,22 +112,25 @@ export function LeadPage() {
     onError,
   });
 
-  if (!lead || !form) return <div className="grid h-full place-items-center">{q.isError ? <Empty title="Lead não encontrado" /> : <Spinner />}</div>;
+  if (!lead) return <div className="grid h-full place-items-center">{q.isError ? <Empty title="Lead não encontrado" /> : <Spinner />}</div>;
 
-  const set = (k: keyof Form) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setForm({ ...form, [k]: e.target.value });
-  const dirty = JSON.stringify(form) !== JSON.stringify(toForm(lead));
-  const save = () =>
-    patch.mutate({
-      name: form.name || null,
-      phone: form.phone || null,
-      email: form.email || null,
-      company: form.company || null,
-      interest: form.interest || null,
-      budget: form.budget || null,
-      timeline: form.timeline || null,
-      notes: form.notes || null,
-      value: form.value ? Number(form.value.replace(",", ".")) : null,
-    });
+  const base = toForm(lead);
+  const form: Form = { ...base, ...edits };
+  const set = (k: keyof Form) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setEdits((prev) => ({ ...prev, [k]: value }));
+  };
+  const changed = (Object.keys(edits) as Array<keyof Form>).filter((k) => edits[k] !== base[k]);
+  const dirty = changed.length > 0;
+  const parsedValue = parseBRL(form.value);
+  const valueInvalid = Number.isNaN(parsedValue);
+  const save = () => {
+    if (valueInvalid) return toast({ kind: "error", text: "Valor inválido. Use, por exemplo, 1.500,00" });
+    // Envia só os campos alterados
+    const body: Record<string, unknown> = {};
+    for (const k of changed) body[k] = k === "value" ? parsedValue : form[k].trim() || null;
+    saveFields.mutate(body);
+  };
 
   return (
     <div className="h-full overflow-y-auto">
@@ -178,8 +188,8 @@ export function LeadPage() {
               <Field label="Interesse">
                 <input className="input" value={form.interest} onChange={set("interest")} />
               </Field>
-              <Field label="Valor (R$)">
-                <input className="input" inputMode="decimal" value={form.value} onChange={set("value")} />
+              <Field label="Valor (R$)" hint={valueInvalid ? "Valor inválido. Ex.: 1.500,00" : undefined}>
+                <input className="input" inputMode="decimal" placeholder="1.500,00" value={form.value} onChange={set("value")} />
               </Field>
               <Field label="Orçamento">
                 <input className="input" value={form.budget} onChange={set("budget")} />
@@ -204,11 +214,11 @@ export function LeadPage() {
               </Button>
               <div className="flex gap-2">
                 {dirty && (
-                  <Button variant="secondary" onClick={() => setForm(toForm(lead))}>
+                  <Button variant="secondary" onClick={() => setEdits({})}>
                     Descartar
                   </Button>
                 )}
-                <Button disabled={!dirty} loading={patch.isPending} onClick={save}>
+                <Button disabled={!dirty || valueInvalid} loading={saveFields.isPending} onClick={save}>
                   Salvar
                 </Button>
               </div>

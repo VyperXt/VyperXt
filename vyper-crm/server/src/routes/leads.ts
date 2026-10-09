@@ -199,7 +199,7 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
       .select({ id: messages.id })
       .from(messages)
       .where(eq(messages.leadId, id))
-      .orderBy(desc(messages.createdAt), desc(messages.id))
+      .orderBy(desc(messages.id))
       .limit(1);
     return { insight, stale: Boolean(insight && last && insight.lastMessageId !== last.id), aiEnabled: ctx.ai.enabled };
   });
@@ -258,7 +258,8 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
         );
         created.push(lead.id);
       } catch (err) {
-        errors.push({ index, error: (err as Error).message });
+        if (!(err instanceof HttpError)) ctx.log.error({ err: String(err), index }, "erro ao importar lead");
+        errors.push({ index, error: err instanceof HttpError ? err.message : "Erro inesperado ao criar este lead." });
       }
     }
     return { created: created.length, ids: created, errors };
@@ -301,7 +302,7 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
           })
           .from(messages)
           .where(inArray(messages.leadId, ids))
-          .orderBy(messages.leadId, desc(messages.createdAt), desc(messages.id))
+          .orderBy(messages.leadId, desc(messages.id))
       : [];
     const byLead = new Map(lastMessages.map((m) => [m.leadId, m]));
     return rows.map((lead) => ({ lead, lastMessage: byLead.get(lead.id) ?? null }));

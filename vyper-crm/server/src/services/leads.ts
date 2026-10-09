@@ -1,5 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
+import { isInsecureAdminPassword } from "../config.js";
 import type { AppContext } from "../context.js";
 import type { Db } from "../db/client.js";
 import { activities, leads, sequences, stages, users, type Lead, type Stage } from "../db/schema.js";
@@ -26,6 +27,11 @@ export async function ensureDefaultData(ctx: AppContext): Promise<void> {
   }
   const [userCount] = await db.select({ n: sql<number>`count(*)::int` }).from(users);
   if (!userCount?.n) {
+    if (config.NODE_ENV === "production" && isInsecureAdminPassword(config.ADMIN_PASSWORD)) {
+      throw new Error(
+        "ADMIN_PASSWORD está com o valor de exemplo ou tem menos de 8 caracteres. Defina uma senha forte no .env antes da primeira execução.",
+      );
+    }
     await db.insert(users).values({
       name: config.ADMIN_NAME,
       email: config.ADMIN_EMAIL.toLowerCase(),
@@ -119,17 +125,38 @@ function clean(v: string | null | undefined): string | null {
   return t ? t : null;
 }
 
-export async function createLead(
-  ctx: AppContext,
-  input: LeadInput & { waName?: string | null },
-  opts: { userId?: number | null } = {},
-): Promise<Lead> {
-  const phone = input.phone ? normalizePhone(input.phone) : null;
-  if (input.phone && !phone) throw new HttpError(400, "Telefone inválido. Use DDD + número (ex.: 11999998888).");
-  if (phone) {
-    const [existing] = await ctx.db.select().from(leads).where(eq(leads.phone, phone));
-    if (existing) throw new HttpError(409, `Já existe um lead com este telefone (#${existing.id}).`);
+/** Etapa e responsável precisam existir (senão o banco recusaria com erro 500). */
+async function assertReferences(db: Db, refs: { stageId?: number | null; ownerId?: number | null }): Promise<void> {
+  if (refs.stageId != null) {
+    const [st] = await db.select({ id: stages.id }).from(stages).where(eq(stages.id, refs.stageId));
+    if (!st) throw new HttpError(400, `A etapa #${refs.stageId} não existe.`);
   }
+  if (refs.ownerId != null) {
+    const [u] = await db.select({ id: users.id }).from(users).where(eq(users.id, refs.ownerId));
+    if (!u) throw new HttpError(400, `O usuário #${refs.ownerId} não existe.`);
+  }
+}
+
+function parsePhoneInput(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const phone = normalizePhone(value);
+  if (!phone) throw new HttpError(400, "Telefone inválido. Use DDD + número (ex.: 11999998888).");
+  return phone;
+}
+
+type NewLeadInput = LeadInput & { waName?: string | null };
+
+/**
+ * Insere o lead de forma atômica: se outro processo criou o mesmo telefone ao mesmo tempo,
+ * devolve null em vez de estourar a restrição única. Efeitos colaterais só para quem inseriu.
+ */
+async function insertLead(
+  ctx: AppContext,
+  input: NewLeadInput,
+  phone: string | null,
+  opts: { userId?: number | null },
+): Promise<Lead | null> {
+  await assertReferences(ctx.db, { stageId: input.stageId, ownerId: input.ownerId });
   const settings = await getSettings(ctx.db);
   const stageId = input.stageId ?? (await getDefaultStageId(ctx.db));
   const [lead] = await ctx.db
@@ -153,11 +180,43 @@ export async function createLead(
       temperature: input.temperature ?? "frio",
       score: input.score ?? 0,
     })
+    .onConflictDoNothing({ target: leads.phone })
     .returning();
-  await addActivity(ctx.db, lead!.id, "created", `Lead criado (origem: ${lead!.source})`, undefined, opts.userId);
-  ctx.events.emit("lead.created", { lead: lead! });
-  await onLeadCreated(ctx, lead!);
-  return lead!;
+  if (!lead) return null;
+  await addActivity(ctx.db, lead.id, "created", `Lead criado (origem: ${lead.source})`, undefined, opts.userId);
+  ctx.events.emit("lead.created", { lead });
+  await onLeadCreated(ctx, lead);
+  return lead;
+}
+
+export async function createLead(ctx: AppContext, input: NewLeadInput, opts: { userId?: number | null } = {}): Promise<Lead> {
+  const phone = parsePhoneInput(input.phone);
+  const duplicate = async () => {
+    const existing = phone ? await findLeadByPhone(ctx.db, phone) : undefined;
+    return new HttpError(409, `Já existe um lead com este telefone (#${existing?.id ?? "?"}).`);
+  };
+  if (phone && (await findLeadByPhone(ctx.db, phone))) throw await duplicate();
+  const lead = await insertLead(ctx, input, phone, opts);
+  if (!lead) throw await duplicate();
+  return lead;
+}
+
+/**
+ * Usado pelas mensagens do WhatsApp: acha o lead pelo telefone (já normalizado) ou cria.
+ * Seguro quando chegam várias mensagens de um número novo ao mesmo tempo.
+ */
+export async function findOrCreateLeadByPhone(
+  ctx: AppContext,
+  phone: string,
+  input: Omit<NewLeadInput, "phone">,
+): Promise<{ lead: Lead; created: boolean }> {
+  const found = await findLeadByPhone(ctx.db, phone);
+  if (found) return { lead: found, created: false };
+  const lead = await insertLead(ctx, input, phone, {});
+  if (lead) return { lead, created: true };
+  const again = await findLeadByPhone(ctx.db, phone);
+  if (!again) throw new Error(`Conflito ao criar lead para ${phone}`);
+  return { lead: again, created: false };
 }
 
 export async function getLead(db: Db, id: number): Promise<Lead> {
@@ -173,11 +232,11 @@ export async function updateLead(
   opts: { userId?: number | null; reason?: string } = {},
 ): Promise<Lead> {
   const before = await getLead(ctx.db, id);
+  await assertReferences(ctx.db, { stageId: patch.stageId, ownerId: patch.ownerId });
   const values: Partial<typeof leads.$inferInsert> = { updatedAt: ctx.now() };
   if (patch.name !== undefined) values.name = clean(patch.name);
   if (patch.phone !== undefined) {
-    const phone = patch.phone ? normalizePhone(patch.phone) : null;
-    if (patch.phone && !phone) throw new HttpError(400, "Telefone inválido.");
+    const phone = parsePhoneInput(patch.phone);
     if (phone && phone !== before.phone) {
       const [dup] = await ctx.db.select({ id: leads.id }).from(leads).where(eq(leads.phone, phone));
       if (dup) throw new HttpError(409, `Já existe um lead com este telefone (#${dup.id}).`);

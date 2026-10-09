@@ -3,7 +3,7 @@ import { CheckCircle2, Copy, Plus, QrCode, RefreshCw, Save, Trash2, XCircle } fr
 import { useEffect, useState, type ReactNode } from "react";
 import { PageHeader } from "../components/Layout";
 import { Button, Field, Spinner, Toggle } from "../components/ui";
-import { api } from "../lib/api";
+import { api, setToken } from "../lib/api";
 import { useErrorToast, useMe, useRealtime, useSettings, useStages, useToast } from "../lib/app-state";
 import type { Settings, Stage, User } from "../lib/types";
 
@@ -26,6 +26,8 @@ export function SettingsPage() {
   const toast = useToast();
   const onError = useErrorToast();
   const [s, setS] = useState<Settings | null>(null);
+  // Texto do campo de palavras de descadastro como a pessoa digita (vírgulas e espaços incluídos)
+  const [kwText, setKwText] = useState<string | null>(null);
 
   useEffect(() => {
     if (q.data && !s) setS(q.data.settings);
@@ -35,6 +37,7 @@ export function SettingsPage() {
     mutationFn: () => api<{ settings: Settings }>("/settings", { method: "PUT", body: s }),
     onSuccess: (r) => {
       setS(r.settings);
+      setKwText(null);
       qc.invalidateQueries({ queryKey: ["settings"] });
       toast({ kind: "success", text: "Configurações salvas." });
     },
@@ -148,8 +151,11 @@ export function SettingsPage() {
                 <Field label="Palavras (separadas por vírgula)">
                   <input
                     className="input"
-                    value={s.automation.optOutKeywords.join(", ")}
-                    onChange={(e) => up("automation", { optOutKeywords: e.target.value.split(",").map((k) => k.trim()).filter(Boolean) })}
+                    value={kwText ?? s.automation.optOutKeywords.join(", ")}
+                    onChange={(e) => {
+                      setKwText(e.target.value);
+                      up("automation", { optOutKeywords: e.target.value.split(",").map((k) => k.trim()).filter(Boolean) });
+                    }}
                   />
                 </Field>
                 <Field label="Resposta de confirmação">
@@ -421,8 +427,10 @@ function TeamTab() {
     onError,
   });
   const change = useMutation({
-    mutationFn: () => api("/auth/password", { body: pwd }),
-    onSuccess: () => {
+    mutationFn: () => api<{ ok: boolean; token: string }>("/auth/password", { body: pwd }),
+    onSuccess: (res) => {
+      // A troca de senha derruba os logins antigos; esta sessão continua com o token novo
+      setToken(res.token);
       setPwd({ current: "", next: "" });
       toast({ kind: "success", text: "Senha alterada." });
     },

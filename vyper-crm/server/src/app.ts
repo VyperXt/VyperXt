@@ -4,10 +4,11 @@ import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyBaseLogger, type FastifyError } from "fastify";
+import Fastify, { LogController, type FastifyBaseLogger, type FastifyError } from "fastify";
 import { AiRefusalError, AiUnavailableError } from "./ai/provider.js";
+import { trustProxyValue } from "./config.js";
 import type { AppContext } from "./context.js";
-import { HttpError } from "./http.js";
+import { claimsOf, HttpError, sessionUser, type SessionClaims } from "./http.js";
 import { authRoutes, publicAuthRoutes } from "./routes/auth.js";
 import { automationRoutes } from "./routes/automations.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
@@ -19,8 +20,8 @@ import { webhookRoutes } from "./routes/webhooks.js";
 
 declare module "@fastify/jwt" {
   interface FastifyJWT {
-    payload: { sub: number; role: "admin" | "agent"; name: string };
-    user: { sub: number; role: "admin" | "agent"; name: string };
+    payload: SessionClaims;
+    user: SessionClaims;
   }
 }
 
@@ -38,9 +39,9 @@ export async function buildApp(ctx: AppContext, opts: BuildOptions = {}) {
   const app = Fastify({
     ...(typeof opts.logger === "object" ? { loggerInstance: opts.logger } : { logger: opts.logger ?? false }),
     bodyLimit: 5 * 1024 * 1024,
-    trustProxy: true,
+    trustProxy: trustProxyValue(ctx.config.TRUST_PROXY),
     // Logamos as requisições nós mesmos (abaixo) para esconder tokens que vão na URL
-    disableRequestLogging: true,
+    logController: new LogController({ disableRequestLogging: true }),
   });
 
   app.addHook("onResponse", async (req, reply) => {
@@ -96,6 +97,8 @@ export async function buildApp(ctx: AppContext, opts: BuildOptions = {}) {
       } catch {
         throw new HttpError(401, "Faça login novamente.");
       }
+      // Usuário removido ou senha trocada depois do login → token não vale mais
+      req.user = claimsOf(await sessionUser(ctx, req.user));
     });
     await authRoutes(priv, ctx);
     await leadRoutes(priv, ctx);

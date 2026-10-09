@@ -171,6 +171,12 @@ export function parseEvolutionWebhook(payload: AnyRecord): ParsedWebhook {
       if (jid.endsWith("@lid")) jid = key.remoteJidAlt ?? key.senderPn ?? data.senderPn ?? jid;
       // Ignora grupos, status e canais
       if (!jid || jid.endsWith("@g.us") || jid === "status@broadcast" || jid.endsWith("@newsletter")) continue;
+      // LID sem o número real: o id interno do WhatsApp não é telefone (gravá-lo criaria um lead
+      // com número inválido, para o qual nenhuma resposta chegaria)
+      if (jid.endsWith("@lid")) {
+        (result.skipped ??= []).push(`${key.id ?? "?"}: remetente só com LID (${jid}), sem número de telefone`);
+        continue;
+      }
       if (data.messageType === "protocolMessage" || data.message?.protocolMessage) continue;
       if (data.message?.reactionMessage) continue;
       const phone = normalizePhone(jid);

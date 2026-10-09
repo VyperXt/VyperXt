@@ -108,7 +108,7 @@ export function LeadsPage() {
           </table>
         )}
       </div>
-      <NewLeadModal open={newOpen} onClose={() => setNewOpen(false)} />
+      <NewLeadModal key={newOpen ? "aberto" : "fechado"} open={newOpen} onClose={() => setNewOpen(false)} />
       <CaptureModal open={captureOpen} onClose={() => setCaptureOpen(false)} />
     </div>
   );

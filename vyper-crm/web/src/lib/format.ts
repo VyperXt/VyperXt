@@ -16,6 +16,26 @@ export function formatPhone(digits: string | null | undefined): string {
   return `+${digits}`;
 }
 
+/**
+ * Lê um valor em reais como as pessoas digitam: "1.500", "1.500,50", "99,90", "99.90", "R$ 2 mil" não.
+ * Vazio → null. Inválido → NaN.
+ */
+export function parseBRL(input: string): number | null {
+  const s = input.replace(/R\$|\s/gi, "");
+  if (!s) return null;
+  let normalized: string;
+  if (s.includes(",")) normalized = s.replace(/\./g, "").replace(",", "."); // vírgula = decimal
+  else if (/^\d+\.\d{1,2}$/.test(s)) normalized = s; // "99.90" = decimal
+  else normalized = s.replace(/\./g, ""); // "1.500" ou "1.500.000" = milhar
+  if (!/^-?\d+(\.\d+)?$/.test(normalized)) return NaN;
+  return Number(normalized);
+}
+
+/** Valor salvo → texto para editar no padrão brasileiro (1500.5 → "1500,5") */
+export function toBRLInput(v: number | null | undefined): string {
+  return v == null ? "" : String(v).replace(".", ",");
+}
+
 export const money = (v: number | null | undefined) =>
   v == null ? "—" : v.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 });
 

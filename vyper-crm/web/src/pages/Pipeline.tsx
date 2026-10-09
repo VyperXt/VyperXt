@@ -142,7 +142,13 @@ export function PipelinePage() {
           );
         })}
       </div>
-      <NewLeadModal open={newLeadStage !== null} onClose={() => setNewLeadStage(null)} stageId={newLeadStage ?? undefined} />
+      {/* key: cada abertura monta um formulário novo, já na etapa da coluna clicada */}
+      <NewLeadModal
+        key={newLeadStage ?? "fechado"}
+        open={newLeadStage !== null}
+        onClose={() => setNewLeadStage(null)}
+        stageId={newLeadStage ?? undefined}
+      />
     </div>
   );
 }

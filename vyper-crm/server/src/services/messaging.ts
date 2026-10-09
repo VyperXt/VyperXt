@@ -5,7 +5,7 @@ import { getSettings } from "../settings.js";
 import type { IncomingMessage, StatusUpdate } from "../whatsapp/types.js";
 import { scheduleLeadAi } from "./ai-flows.js";
 import { onOutboundSent, stopEnrollments } from "./automation.js";
-import { addActivity, createLead, findLeadByPhone, getLead, HttpError } from "./leads.js";
+import { addActivity, findOrCreateLeadByPhone, getLead, HttpError } from "./leads.js";
 
 export interface SendOptions {
   author: Exclude<MessageAuthor, "lead" | "phone">;
@@ -88,20 +88,20 @@ export async function handleIncoming(ctx: AppContext, msg: IncomingMessage): Pro
     if (dup) return null;
   }
 
-  let lead = await findLeadByPhone(db, msg.phone);
-  if (!lead) {
-    lead = await createLead(ctx, {
-      phone: msg.phone,
-      waName: msg.name ?? null,
-      source: "whatsapp",
-      // Se foi você quem puxou a conversa pelo celular, a IA não assume
-      ...(msg.fromMe ? { chatMode: "human" as const } : {}),
-    });
-  } else if (msg.name && !msg.fromMe && msg.name !== lead.waName) {
+  // msg.phone já vem normalizado pelo parser do provedor (com DDI)
+  const { lead, created } = await findOrCreateLeadByPhone(ctx, msg.phone, {
+    waName: msg.name ?? null,
+    source: "whatsapp",
+    // Se foi você quem puxou a conversa pelo celular, a IA não assume
+    ...(msg.fromMe ? { chatMode: "human" as const } : {}),
+  });
+  if (!created && msg.name && !msg.fromMe && msg.name !== lead.waName) {
     await db.update(leads).set({ waName: msg.name }).where(eq(leads.id, lead.id));
   }
 
-  const createdAt = msg.timestamp && msg.timestamp <= ctx.now() ? msg.timestamp : ctx.now();
+  // Hora em que o CRM recebeu (não a do celular do lead): mantém a ordem real das mensagens
+  // em relação às respostas do bot, que usam o mesmo relógio.
+  const createdAt = ctx.now();
 
   if (msg.fromMe) {
     // Mensagem que VOCÊ mandou pelo celular/WhatsApp Web.
@@ -139,7 +139,9 @@ export async function handleIncoming(ctx: AppContext, msg: IncomingMessage): Pro
         status: "sent",
         createdAt,
       })
+      .onConflictDoNothing({ target: messages.externalId })
       .returning();
+    if (!saved) return null; // o mesmo webhook chegou duas vezes ao mesmo tempo
     const settings = await getSettings(db);
     const patch: Partial<typeof leads.$inferInsert> = { lastMessageAt: createdAt, updatedAt: ctx.now() };
     if (lead.chatMode === "bot" && settings.bot.pauseOnPhoneReply) {
@@ -164,7 +166,9 @@ export async function handleIncoming(ctx: AppContext, msg: IncomingMessage): Pro
       status: "received",
       createdAt,
     })
+    .onConflictDoNothing({ target: messages.externalId })
     .returning();
+  if (!saved) return null; // o mesmo webhook chegou duas vezes ao mesmo tempo
 
   await db
     .update(leads)
@@ -227,7 +231,7 @@ export async function getConversation(ctx: AppContext, leadId: number, limit = 4
     .select()
     .from(messages)
     .where(eq(messages.leadId, leadId))
-    .orderBy(desc(messages.createdAt), desc(messages.id))
+    .orderBy(desc(messages.id))
     .limit(limit);
   return rows.reverse();
 }

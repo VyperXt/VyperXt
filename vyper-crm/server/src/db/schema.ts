@@ -21,6 +21,8 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   role: text("role").$type<"admin" | "agent">().notNull().default("agent"),
+  // Sobe a cada troca de senha: invalida os logins (JWT) emitidos antes
+  tokenVersion: integer("token_version").notNull().default(0),
   createdAt: createdAt(),
 });
 

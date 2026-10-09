@@ -85,10 +85,17 @@ export function RealtimeProvider({ children, onNavigate }: { children: ReactNode
     let es: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
+    let hadConnection = false;
 
     const connect = () => {
-      es = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
-      es.addEventListener("ready", () => setConnected(true));
+      // Lê o token a cada (re)conexão: ele muda quando a senha é trocada
+      es = new EventSource(`/api/events?token=${encodeURIComponent(getToken() ?? token)}`);
+      es.addEventListener("ready", () => {
+        setConnected(true);
+        // Reconectou depois de uma queda: pode ter perdido eventos → recarrega tudo
+        if (hadConnection) qc.invalidateQueries();
+        hadConnection = true;
+      });
       es.onerror = () => {
         setConnected(false);
         es?.close();
@@ -107,6 +114,8 @@ export function RealtimeProvider({ children, onNavigate }: { children: ReactNode
           if (leadId) {
             qc.invalidateQueries({ queryKey: ["lead", leadId] });
             qc.invalidateQueries({ queryKey: ["messages", leadId] });
+            // atualiza o aviso "teve mensagem nova depois desta análise" do copiloto
+            if (event.type.startsWith("message.")) qc.invalidateQueries({ queryKey: ["copilot", leadId] });
           }
         }
         if (event.type === "copilot.updated" && leadId) qc.invalidateQueries({ queryKey: ["copilot", leadId] });

@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import pino from "pino";
 import { createAiProvider } from "./ai/provider.js";
 import { buildApp } from "./app.js";
-import { loadConfig } from "./config.js";
+import { insecureSettings, loadConfig } from "./config.js";
 import type { AppContext } from "./context.js";
 import { openDatabase } from "./db/client.js";
 import { EventBus } from "./lib/events.js";
@@ -14,6 +14,21 @@ import { createWhatsAppProvider } from "./whatsapp/index.js";
 
 const config = loadConfig();
 const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
+
+// Em produção, não sobe com os segredos de exemplo do .env.example
+const insecure = insecureSettings(config);
+if (insecure.length) {
+  const msg =
+    `Troque estes valores no .env (estão vazios ou com o texto de exemplo): ${insecure.join(", ")}. Gere segredos com: openssl rand -hex 32` +
+    (insecure.includes("POSTGRES_PASSWORD")
+      ? ". Atenção: o Postgres guarda a senha da primeira vez que subiu. Numa instalação nova, rode 'docker compose down -v' depois de trocar a senha."
+      : "");
+  if (config.NODE_ENV === "production") {
+    logger.fatal(msg);
+    process.exit(1);
+  }
+  logger.warn(msg);
+}
 
 const { db, close } = await openDatabase(config.DATABASE_URL);
 
@@ -40,10 +55,6 @@ const webDist = process.env.WEB_DIST ?? fileURLToPath(new URL("../../web/dist", 
 const app = await buildApp(ctx, { logger, webDist });
 const stopScheduler = startScheduler(ctx, config.SCHEDULER_INTERVAL_MS);
 
-if (config.NODE_ENV === "production") {
-  if (config.JWT_SECRET === "troque-este-segredo-jwt-agora") logger.warn("JWT_SECRET está com o valor padrão — troque no .env!");
-  if (config.ADMIN_PASSWORD === "admin123") logger.warn("ADMIN_PASSWORD está com o valor padrão — troque a senha!");
-}
 if (!ctx.ai.enabled) logger.warn("ANTHROPIC_API_KEY não configurada: recursos de IA desativados.");
 
 await app.listen({ port: config.PORT, host: config.HOST });

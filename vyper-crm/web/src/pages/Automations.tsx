@@ -164,13 +164,31 @@ function splitDelay(min: number) {
   return { n: min, f: 1 };
 }
 
+// No editor, cada passo guarda o texto digitado e a unidade escolhida: assim apagar o número
+// para digitar outro não troca "dias" por "minutos" sem a pessoa perceber.
+type EditorStep = SequenceStep & { delayText: string; unit: number };
+
+const toEditorStep = (st: SequenceStep): EditorStep => {
+  const { n, f } = splitDelay(st.delayMinutes);
+  return { ...st, delayText: String(n), unit: f };
+};
+
+const validDelay = (text: string) => /^\d+([.,]\d+)?$/.test(text.trim());
+
 function SequenceEditor({ draft, onClose }: { draft: Draft; onClose: () => void }) {
   const qc = useQueryClient();
   const onError = useErrorToast();
-  const [d, setD] = useState<Draft>(draft);
+  const [d, setD] = useState<Omit<Draft, "steps"> & { steps: EditorStep[] }>(() => ({ ...draft, steps: draft.steps.map(toEditorStep) }));
   const save = useMutation({
     mutationFn: () => {
-      const { id, ...body } = d;
+      const { id, steps, ...rest } = d;
+      const body = {
+        ...rest,
+        steps: steps.map(({ delayText, unit, ...st }) => ({
+          ...st,
+          delayMinutes: Math.round(Number(delayText.trim().replace(",", ".")) * unit),
+        })),
+      };
       return id ? api(`/sequences/${id}`, { method: "PATCH", body }) : api("/sequences", { body });
     },
     onSuccess: () => {
@@ -179,7 +197,7 @@ function SequenceEditor({ draft, onClose }: { draft: Draft; onClose: () => void 
     },
     onError,
   });
-  const setStep = (i: number, patch: Partial<SequenceStep>) => setD({ ...d, steps: d.steps.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
+  const setStep = (i: number, patch: Partial<EditorStep>) => setD({ ...d, steps: d.steps.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
 
   return (
     <Modal open onClose={onClose} title={d.id ? "Editar automação" : "Nova automação"} wide>
@@ -210,20 +228,19 @@ function SequenceEditor({ draft, onClose }: { draft: Draft; onClose: () => void 
           <p className="label">Passos</p>
           <div className="space-y-2">
             {d.steps.map((st, i) => {
-              const { n, f } = splitDelay(st.delayMinutes);
               return (
                 <div key={i} className="rounded-lg border border-slate-200 p-3">
                   <div className="flex flex-wrap items-center gap-2 text-sm">
                     <span className="font-medium">{i + 1}.</span>
                     <span className="text-slate-500">{i === 0 ? "Esperar" : "Depois de mais"}</span>
                     <input
-                      type="number"
-                      min={0}
-                      className="input w-20 py-1"
-                      value={n}
-                      onChange={(e) => setStep(i, { delayMinutes: Math.max(0, Number(e.target.value)) * f })}
+                      inputMode="decimal"
+                      className={`input w-20 py-1 ${validDelay(st.delayText) ? "" : "border-red-400"}`}
+                      value={st.delayText}
+                      onChange={(e) => setStep(i, { delayText: e.target.value })}
+                      aria-label="Tempo de espera"
                     />
-                    <select className="input w-auto py-1" value={f} onChange={(e) => setStep(i, { delayMinutes: n * Number(e.target.value) })}>
+                    <select className="input w-auto py-1" value={st.unit} onChange={(e) => setStep(i, { unit: Number(e.target.value) })} aria-label="Unidade">
                       {UNITS.map((u) => (
                         <option key={u.f} value={u.f}>
                           {u.label}
@@ -264,7 +281,7 @@ function SequenceEditor({ draft, onClose }: { draft: Draft; onClose: () => void 
             size="sm"
             className="mt-2"
             icon={<Plus className="size-3.5" />}
-            onClick={() => setD({ ...d, steps: [...d.steps, { delayMinutes: 1440, mode: "ai", message: "" }] })}
+            onClick={() => setD({ ...d, steps: [...d.steps, toEditorStep({ delayMinutes: 1440, mode: "ai", message: "" })] })}
           >
             Adicionar passo
           </Button>
@@ -273,7 +290,11 @@ function SequenceEditor({ draft, onClose }: { draft: Draft; onClose: () => void 
           <Button variant="secondary" onClick={onClose}>
             Cancelar
           </Button>
-          <Button loading={save.isPending} disabled={!d.name.trim() || d.steps.some((s) => !s.message.trim())} onClick={() => save.mutate()}>
+          <Button
+            loading={save.isPending}
+            disabled={!d.name.trim() || d.steps.some((s) => !s.message.trim() || !validDelay(s.delayText))}
+            onClick={() => save.mutate()}
+          >
             Salvar
           </Button>
         </div>
