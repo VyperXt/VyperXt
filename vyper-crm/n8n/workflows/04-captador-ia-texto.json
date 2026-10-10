@@ -1,0 +1,126 @@
+{
+  "id": "vyperCrmCaptador1",
+  "name": "CRM • Captador com IA (texto solto → lead)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Captador de leads com IA\n\nMande **qualquer texto** (e-mail recebido, DM do Instagram, anotação, assinatura) para `POST /webhook/captar-texto` com `{ \"texto\": \"...\" }`.\n\nA IA encontra nome, telefone, e-mail, empresa e interesse, cria o lead e já qualifica.\n\n💡 Troque o gatilho por **Gmail Trigger**, **IMAP** ou **Instagram** para captar automaticamente.",
+        "height": 340,
+        "width": 520
+      },
+      "id": "f5e0ea24-5e05-41d1-9974-b710564a4670",
+      "name": "Nota d932",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -400
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "captar-texto",
+        "options": {}
+      },
+      "id": "3a5cb06c-b88e-4355-ad58-35271f434f80",
+      "name": "Receber texto",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "6158ee04-483a-46cc-9f63-468ecc6d4547"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "9100a5b6-a581-4a49-9f4f-e517990870d6",
+              "name": "crmUrl",
+              "value": "http://crm:3000",
+              "type": "string"
+            },
+            {
+              "id": "f2b6cbf8-e42b-491b-b9d9-14d4da5c6126",
+              "name": "crmApiKey",
+              "value": "COLE-AQUI-A-CRM_API_KEY-DO-.env",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "27b62650-ae1a-41d1-8eb7-82b3bb380f84",
+      "name": "Configuração",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Troque crmApiKey pela CRM_API_KEY do seu .env. Se o n8n não estiver no mesmo docker-compose, troque crmUrl pelo endereço do CRM.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuração').first().json.crmUrl }}/api/integrations/leads",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Configuração').first().json.crmApiKey }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  rawText: $json.body.texto ?? $json.body.text,\n  source: $json.body.origem ?? 'captador-ia',\n  qualify: true\n}) }}"
+      },
+      "id": "8f3cf557-745f-46ee-a774-2f7643eafb10",
+      "name": "IA extrai e cria o lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Receber texto": {
+      "main": [
+        [
+          {
+            "node": "Configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuração": {
+      "main": [
+        [
+          {
+            "node": "IA extrai e cria o lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "tags": []
+}

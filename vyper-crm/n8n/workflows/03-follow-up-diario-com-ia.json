@@ -1,0 +1,366 @@
+{
+  "id": "vyperCrmFollowUp1",
+  "name": "CRM • Follow-up diário com IA (leads parados)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Follow-up diário com IA\n\nBusca leads sem conversa há X horas (só quem tem WhatsApp, não pediu para sair e está em etapa aberta). Para cada um, a **IA escreve uma mensagem personalizada** com base no histórico — e pode decidir **não enviar** se o lead já disse que não tem interesse.\n\nQuem recebeu ganha a etiqueta `follow-up-n8n` e não recebe de novo. Se o envio falhar (número sem WhatsApp, por exemplo) ou a IA decidir não mandar, o lead ganha `follow-up-n8n-pulado` e sai da fila (senão ele ocuparia a lista todo dia). Para tentar de novo, tire a etiqueta no CRM.\n\n💡 Dica: o CRM também tem automações nativas em **Automações**. Use este workflow quando quiser lógica própria.",
+        "height": 360,
+        "width": 600
+      },
+      "id": "660e81fd-b6b2-4883-b253-b238a06cc90e",
+      "name": "Nota e450",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -440
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 10
+            }
+          ]
+        }
+      },
+      "id": "615808aa-5043-4fa6-a396-abe7ee581875",
+      "name": "Todo dia às 10h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "90bb6bcc-8021-4646-b11c-313197e9b2ea",
+              "name": "crmUrl",
+              "value": "http://crm:3000",
+              "type": "string"
+            },
+            {
+              "id": "1d051943-2d76-4232-bfed-a37c92eabb0f",
+              "name": "crmApiKey",
+              "value": "COLE-AQUI-A-CRM_API_KEY-DO-.env",
+              "type": "string"
+            },
+            {
+              "id": "ac017e17-33ee-4327-af96-a0da26117712",
+              "name": "horasSemConversa",
+              "value": 48,
+              "type": "number"
+            },
+            {
+              "id": "7ad08981-2082-4bfd-98c7-1eb266b4294e",
+              "name": "instrucao",
+              "value": "Retomar a conversa de forma leve, lembrando do interesse do lead e perguntando se ficou alguma dúvida.",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "da4f7729-f89a-4b95-ac28-90c47b3d05b2",
+      "name": "Configuração",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Troque crmApiKey pela CRM_API_KEY do seu .env. Se o n8n não estiver no mesmo docker-compose, troque crmUrl pelo endereço do CRM.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.crmUrl }}/api/integrations/leads?automatable=true&withoutTag=follow-up-n8n,follow-up-n8n-pulado&inactiveHours={{ $json.horasSemConversa }}&limit=50",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Configuração').first().json.crmApiKey }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "809d1937-fb25-4cc5-a48c-1981986d738b",
+      "name": "Buscar leads parados",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "items",
+        "options": {}
+      },
+      "id": "21d7c7f3-22ef-40bf-bfdc-5c0bd2241df4",
+      "name": "Um lead por vez",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bf68b8ec-1b03-48f2-9bf7-2be861b3d4e0",
+              "leftValue": "={{ ($json.tags || []).some((t) => t === 'follow-up-n8n' || t === 'follow-up-n8n-pulado') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3dd94ef2-059f-4467-9164-a07660c007da",
+      "name": "Ainda não recebeu?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuração').first().json.crmUrl }}/api/integrations/leads/{{ $json.id }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Configuração').first().json.crmApiKey }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ai: true, instruction: $('Configuração').first().json.instrucao }) }}"
+      },
+      "id": "6957e003-749b-4a8e-b5ef-4213c58c7046",
+      "name": "IA escreve e envia o follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        -100
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e6986ab3-496b-4bb2-bb85-d7de4282800e",
+              "leftValue": "={{ $json.sent === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3a29d20d-a319-42b3-926c-cb6a034f58db",
+      "name": "Enviou?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $('Configuração').first().json.crmUrl }}/api/integrations/leads/{{ $('Ainda não recebeu?').item.json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Configuração').first().json.crmApiKey }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ addTags: ['follow-up-n8n'] }) }}"
+      },
+      "id": "b7639096-0f88-41d4-b224-d893050610ff",
+      "name": "Marcar lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        -100
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $('Configuração').first().json.crmUrl }}/api/integrations/leads/{{ $('Ainda não recebeu?').item.json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Configuração').first().json.crmApiKey }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ addTags: ['follow-up-n8n-pulado'] }) }}"
+      },
+      "id": "5f0c2a8e-7d4b-4e61-9a3f-2c8b1d6e4f70",
+      "name": "Marcar como pulado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        100
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Todo dia às 10h": {
+      "main": [
+        [
+          {
+            "node": "Configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuração": {
+      "main": [
+        [
+          {
+            "node": "Buscar leads parados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar leads parados": {
+      "main": [
+        [
+          {
+            "node": "Um lead por vez",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Um lead por vez": {
+      "main": [
+        [
+          {
+            "node": "Ainda não recebeu?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ainda não recebeu?": {
+      "main": [
+        [
+          {
+            "node": "IA escreve e envia o follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IA escreve e envia o follow-up": {
+      "main": [
+        [
+          {
+            "node": "Enviou?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviou?": {
+      "main": [
+        [
+          {
+            "node": "Marcar lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar como pulado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "tags": []
+}

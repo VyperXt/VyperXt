@@ -1,0 +1,290 @@
+{
+  "id": "vyperCrmAlertas01",
+  "name": "CRM • Alertas (lead quente, transferência, lead novo)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Alertas em tempo real\n\nO CRM envia eventos para `POST /webhook/crm-eventos` (já configurado no docker-compose via `N8N_WEBHOOK_URL`).\n\nEventos: `lead.created`, `lead.hot`, `lead.handoff`, `lead.stage_changed`, `lead.opted_out`, `message.received`, `message.sent`.\n\nConfigure sua credencial do Telegram e o *Chat ID* — ou troque o último nó por e-mail, Slack, Discord, planilha...",
+        "height": 330,
+        "width": 560
+      },
+      "id": "027a5340-081f-4ca6-9b98-ae9ee3e08d0c",
+      "name": "Nota 66c1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -420
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "crm-eventos",
+        "options": {}
+      },
+      "id": "44b15b64-cab4-451f-8d37-9818c5a660a2",
+      "name": "Eventos do CRM",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "60edc01e-178b-4f9e-a96e-e8786029fa27"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "860a14f5-4f39-4f61-b239-9c80f710468b",
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "lead.hot",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Lead quente"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7a6e7ae7-3fb3-4222-bca7-14631c19dfc7",
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "lead.handoff",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Passou para humano"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "9a764f67-f55f-46e1-a52c-6d1ef4970452",
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "lead.created",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Lead novo"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5ece525a-b7d8-4ea4-9ab7-94929e7139a5",
+      "name": "Qual evento?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7576b692-50e0-4c68-8afd-dab73ec41476",
+              "name": "texto",
+              "value": "=🔥 Lead quente: {{ ($json.body.data.lead.name || $json.body.data.lead.waName || $json.body.data.lead.phone) }} (nota {{ $json.body.data.score }})\n{{ $json.body.data.summary }}\nWhatsApp: {{ $json.body.data.lead.phone }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "34bc95ce-f97f-4585-8b22-94427d4b14d7",
+      "name": "Texto: lead quente",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "57125e32-1b07-4b55-814a-0aa094c75882",
+              "name": "texto",
+              "value": "=🙋 A IA passou {{ ($json.body.data.lead.name || $json.body.data.lead.waName || $json.body.data.lead.phone) }} para você.\nMotivo: {{ $json.body.data.reason }}\nWhatsApp: {{ $json.body.data.lead.phone }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "29657670-d56c-4833-906c-85db8393dbaa",
+      "name": "Texto: passou para humano",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1d18e4db-4e32-4dbb-9c08-63a61133f240",
+              "name": "texto",
+              "value": "=🆕 Novo lead ({{ $json.body.data.lead.source }}): {{ ($json.body.data.lead.name || $json.body.data.lead.waName || $json.body.data.lead.phone) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cc6b12e0-94fc-4996-862c-69237c431453",
+      "name": "Texto: lead novo",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "COLE-AQUI-O-CHAT-ID",
+        "text": "={{ $json.texto }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "e852ebfb-e4a4-44e4-a233-6448264fcb3f",
+      "name": "Avisar no Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        0
+      ],
+      "webhookId": "2b71fd83-92c3-4ea8-8510-af53faa52ed2"
+    }
+  ],
+  "connections": {
+    "Eventos do CRM": {
+      "main": [
+        [
+          {
+            "node": "Qual evento?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qual evento?": {
+      "main": [
+        [
+          {
+            "node": "Texto: lead quente",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Texto: passou para humano",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Texto: lead novo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto: lead quente": {
+      "main": [
+        [
+          {
+            "node": "Avisar no Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto: passou para humano": {
+      "main": [
+        [
+          {
+            "node": "Avisar no Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto: lead novo": {
+      "main": [
+        [
+          {
+            "node": "Avisar no Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "tags": []
+}

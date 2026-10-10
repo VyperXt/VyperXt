@@ -1,0 +1,244 @@
+{
+  "id": "vyperCrmCaptacao1",
+  "name": "CRM • Captação de leads (formulário e site)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Captação de leads (formulário / site)\n\n**Formulário (n8n):** o n8n hospeda um formulário pronto. Ative o workflow e use a *Production URL* do nó.\n\n**Webhook do seu site:** seu site faz `POST` com `{ nome, whatsapp, email, mensagem }`.\n\nO CRM cria (ou atualiza) o lead, a **IA qualifica** com base na mensagem e manda a **boas-vindas no WhatsApp**. Depois disso o bot/copiloto assume a conversa.",
+        "height": 330,
+        "width": 520
+      },
+      "id": "ed4e918c-0437-433d-9607-be0b86da9120",
+      "name": "Nota 14a3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -380
+      ]
+    },
+    {
+      "parameters": {
+        "formTitle": "Fale com a gente",
+        "formDescription": "Deixe seu contato que a gente te chama no WhatsApp em instantes.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Nome",
+              "placeholder": "Seu nome",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "WhatsApp",
+              "placeholder": "(11) 99999-9999",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "E-mail",
+              "fieldType": "email",
+              "placeholder": "voce@email.com"
+            },
+            {
+              "fieldLabel": "O que você procura?",
+              "fieldType": "textarea"
+            }
+          ]
+        },
+        "options": {
+          "path": "contato",
+          "appendAttribution": false,
+          "buttonLabel": "Quero ser atendido",
+          "respondWithOptions": {
+            "values": {
+              "respondWith": "text",
+              "formSubmittedText": "Recebemos seu contato! Em instantes vamos te chamar no WhatsApp 😊"
+            }
+          }
+        }
+      },
+      "id": "bc266bcd-0833-4670-9ddc-4c65ad17054e",
+      "name": "Formulário (n8n)",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "780e1ded-fcd8-438b-83db-03a0cb2de960"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-site",
+        "options": {}
+      },
+      "id": "56eaa656-d7d6-44cd-910e-d86f37b12623",
+      "name": "Webhook do seu site",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        220
+      ],
+      "webhookId": "8cca3b3e-d897-4928-85cb-8d6305e9b1f7"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3f2defdf-83cf-49dd-9e05-a5a5a7ee2af8",
+              "name": "Nome",
+              "value": "={{ $json.body.nome ?? $json.body.name }}",
+              "type": "string"
+            },
+            {
+              "id": "d3274bf4-dc4b-42b0-991f-4b1decb30e22",
+              "name": "WhatsApp",
+              "value": "={{ $json.body.whatsapp ?? $json.body.telefone ?? $json.body.phone }}",
+              "type": "string"
+            },
+            {
+              "id": "91972862-74a3-464c-8618-96a9f066449d",
+              "name": "E-mail",
+              "value": "={{ $json.body.email ?? '' }}",
+              "type": "string"
+            },
+            {
+              "id": "7e6ca4ba-b410-4ebb-8059-1597eeb67cc2",
+              "name": "O que você procura?",
+              "value": "={{ $json.body.mensagem ?? $json.body.message ?? '' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0b4c8b82-3ee0-4cb8-86ae-6ea042701af5",
+      "name": "Padronizar campos",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "9961f8c0-9f1d-455d-a0ca-de4f98c1399c",
+              "name": "crmUrl",
+              "value": "http://crm:3000",
+              "type": "string"
+            },
+            {
+              "id": "96bfa2cf-a4e2-44b6-9408-e1592b730dc2",
+              "name": "crmApiKey",
+              "value": "COLE-AQUI-A-CRM_API_KEY-DO-.env",
+              "type": "string"
+            },
+            {
+              "id": "bdce58d5-b06a-411f-8775-f4b612b7f57d",
+              "name": "boasVindas",
+              "value": "Oi {{primeiro_nome}}! Aqui é da equipe 😊 Recebemos seu contato pelo site. Me conta um pouquinho mais do que você precisa?",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "114db288-5d61-40b5-9cd0-5fc5cd5e6cde",
+      "name": "Configuração",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        0
+      ],
+      "notes": "Troque crmApiKey pela CRM_API_KEY do seu .env. Se o n8n não estiver no mesmo docker-compose, troque crmUrl pelo endereço do CRM.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuração').first().json.crmUrl }}/api/integrations/leads",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $('Configuração').first().json.crmApiKey }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  name: $json['Nome'],\n  phone: $json['WhatsApp'],\n  email: $json['E-mail'] || undefined,\n  message: $json['O que você procura?'] || undefined,\n  source: 'formulario',\n  qualify: true,\n  welcomeMessage: $json.boasVindas\n}) }}"
+      },
+      "id": "1a470043-f93f-4684-9451-e500107a14f9",
+      "name": "Criar lead no CRM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Formulário (n8n)": {
+      "main": [
+        [
+          {
+            "node": "Configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook do seu site": {
+      "main": [
+        [
+          {
+            "node": "Padronizar campos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Padronizar campos": {
+      "main": [
+        [
+          {
+            "node": "Configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuração": {
+      "main": [
+        [
+          {
+            "node": "Criar lead no CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "tags": []
+}
