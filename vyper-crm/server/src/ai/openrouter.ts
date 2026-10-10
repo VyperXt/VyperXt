@@ -44,7 +44,7 @@ interface ChatResponse {
   choices?: Array<{
     finish_reason?: string | null;
     native_finish_reason?: string | null;
-    error?: { code?: number; message?: string };
+    error?: { code?: number; message?: string; metadata?: Record<string, unknown> };
     message?: { content?: string | null; refusal?: string | null };
   }>;
 }
@@ -142,26 +142,34 @@ export class OpenRouterProvider implements AiProvider {
 
     // Até 2 tentativas de conteúdo: a segunda mostra ao modelo o que veio errado
     for (let attempt = 0; attempt < 2; attempt++) {
-      const content = await this.complete(req.task, messages, schema, mode);
+      const content = await this.complete(req.task, messages, schema, mode, attempt === 0);
       let problem: string;
       try {
         const parsed = req.schema.safeParse(extractJson(content));
         if (parsed.success) return parsed.data as z.infer<T>;
         problem = parsed.error.issues.map((i) => `${i.path.join(".") || "(raiz)"}: ${i.message}`).join("; ");
       } catch {
-        problem = "a resposta não é um JSON válido";
+        problem = content.trim() ? "a resposta não é um JSON válido" : "a resposta veio vazia";
       }
       if (attempt === 1) throw new AiError(`Resposta da IA fora do formato na tarefa "${req.task}": ${problem}`);
-      messages.push(
-        { role: "assistant", content: content.slice(0, 4000) },
-        { role: "user", content: `Sua resposta não seguiu o formato pedido (${problem}). Responda de novo, só com o JSON correto.` },
-      );
+      // Mensagem vazia do assistente é rejeitada pela API: só repete o pedido com a correção
+      if (content.trim()) messages.push({ role: "assistant", content: content.slice(0, 4000) });
+      messages.push({ role: "user", content: `Sua resposta não seguiu o formato pedido (${problem}). Responda de novo, só com o JSON correto.` });
     }
     throw new Error("inalcançável");
   }
 
-  /** Uma chamada ao /chat/completions, com as novas tentativas de rede e de limite por minuto. */
-  private async complete(task: string, messages: ChatMessage[], schema: Record<string, unknown>, mode: Mode): Promise<string> {
+  /**
+   * Uma chamada ao /chat/completions, com as novas tentativas de rede e de limite por minuto.
+   * firstTurn: só no primeiro pedido de um formato um 400/404 pode significar "formato não aceito".
+   */
+  private async complete(
+    task: string,
+    messages: ChatMessage[],
+    schema: Record<string, unknown>,
+    mode: Mode,
+    firstTurn: boolean,
+  ): Promise<string> {
     const body: Record<string, unknown> = {
       model: this.opts.model,
       messages,
@@ -195,7 +203,7 @@ export class OpenRouterProvider implements AiProvider {
           signal: AbortSignal.timeout(this.opts.timeoutMs ?? 120_000),
         });
       } catch (err) {
-        // Rede/timeout: tenta de novo algumas vezes
+        // Rede/timeout antes da resposta: tenta de novo algumas vezes
         if (attempt < 2) {
           await this.sleep(1000 * 3 ** attempt);
           continue;
@@ -206,42 +214,75 @@ export class OpenRouterProvider implements AiProvider {
       let data: ChatResponse = {};
       try {
         data = (await res.json()) as ChatResponse;
-      } catch {
-        /* corpo vazio ou HTML */
+      } catch (err) {
+        // Com status 200 o corpo só chega quando o modelo termina: falhar aqui é timeout ou conexão caída
+        // no meio da geração (que já conta na cota). Não repete; avisa.
+        if (res.ok) {
+          throw new AiError(`O OpenRouter não terminou a resposta da tarefa "${task}" a tempo: ${(err as Error).message}`);
+        }
+        /* erro com corpo vazio ou HTML */
       }
       // O OpenRouter pode devolver 200 com erro no corpo (falha durante a geração)
       const error = data.error ?? data.choices?.[0]?.error;
       const status = !res.ok ? res.status : error ? (error.code ?? 502) : 200;
+      const message = String(error?.message ?? `HTTP ${status}`);
 
       if (status === 429) {
-        // Sem dica de espera (comum quando o limite é do provedor do modelo gratuito): uma pausa curta
-        // e nova tentativa — o openrouter/free pode escolher outro modelo
-        const wait = this.rateLimitWait(res) ?? (rateLimitWaits === 0 ? 5_000 : null);
-        if (wait !== null && wait <= (this.opts.maxRateLimitWaitMs ?? 20_000) && rateLimitWaits < 3) {
+        const hint = this.rateLimitWait(res, error);
+        // Acabou a cota do dia: não adianta esperar
+        if (/per-day|per day/i.test(message) || (hint !== null && hint > 120_000)) {
+          const reset = hint !== null ? new Date(this.now() + hint).toISOString().slice(11, 16) + " UTC" : null;
+          throw new AiRateLimitError(
+            "Limite diário do OpenRouter atingido (modelos gratuitos: 50 pedidos por dia; 1000 por dia depois de " +
+              `comprar US$ 10 em créditos).${reset ? ` Libera por volta de ${reset}.` : ""}`,
+            { daily: true, retryAfterMs: hint },
+          );
+        }
+        // Limite por minuto ou modelo gratuito ocupado: passa logo. Espera e tenta de novo
+        // (sem dica de espera, pausas curtas — o openrouter/free pode escolher outro modelo)
+        const wait = hint ?? ([5_000, 15_000][rateLimitWaits] ?? null);
+        if (wait !== null && wait <= (this.opts.maxRateLimitWaitMs ?? 65_000) && rateLimitWaits < 3) {
           rateLimitWaits++;
-          await this.sleep(wait);
+          await this.sleep(wait + 250);
           continue;
         }
-        const reset = this.resetTime(res);
         throw new AiRateLimitError(
-          "Limite de uso do OpenRouter atingido (modelos gratuitos: 20 pedidos por minuto e 50 por dia; 1000 por dia " +
-            `depois de comprar US$ 10 em créditos).${reset ? ` Libera por volta de ${reset}.` : ""}`,
+          `OpenRouter ocupado agora na tarefa "${task}" (limite de 20 pedidos por minuto ou modelo gratuito sobrecarregado). ` +
+            "Tente de novo em instantes.",
+          { daily: false, retryAfterMs: hint },
         );
       }
       if (status !== 200) {
-        const message = String(error?.message ?? `HTTP ${status}`);
         if (status === 401) throw new AiError("OPENROUTER_API_KEY inválida ou desativada.");
         if (status === 402) {
           throw new AiError("OpenRouter sem saldo: mesmo os modelos gratuitos param de responder com saldo negativo.");
         }
-        if (/data policy|privacy|prompt training|publish prompts/i.test(message)) {
+        if (/publish prompts|publication/i.test(message)) {
           throw new AiError(
-            "Os modelos gratuitos do OpenRouter exigem liberar, em openrouter.ai/settings/privacy, o uso de provedores " +
-              `gratuitos que podem guardar os prompts. Detalhe: ${message}`,
+            "O modelo escolhido no OpenRouter só tem provedores gratuitos que podem PUBLICAR as conversas (elas têm dados " +
+              "pessoais dos seus clientes). Não libere a publicação: use OPENROUTER_MODEL=openrouter/free, fixe outro modelo " +
+              `ou use um modelo pago. Detalhe: ${message}`,
+          );
+        }
+        if (/data policy|privacy|prompt training|train on/i.test(message)) {
+          throw new AiError(
+            "Os modelos gratuitos do OpenRouter exigem liberar, em openrouter.ai/settings/privacy, provedores gratuitos que " +
+              `podem guardar e usar as conversas para treinar modelos. Detalhe: ${message}`,
           );
         }
         if (status === 403) throw new AiRefusalError(`O OpenRouter bloqueou o pedido da tarefa "${task}": ${message}`);
-        if ((status === 400 || status === 404) && mode !== "none") throw new UnsupportedFormatError(message);
+        // Formato não aceito pelo modelo: só no primeiro pedido e só quando o erro fala de formato/parâmetros
+        // (modelo inexistente, contexto grande demais etc. não melhoram trocando o formato)
+        const errorType = String((error?.metadata as Record<string, unknown> | undefined)?.error_type ?? "");
+        if (
+          (status === 400 || status === 404) &&
+          mode !== "none" &&
+          firstTurn &&
+          errorType !== "invalid_prompt" &&
+          /response_format|json_schema|json_object|structured|schema|requested parameters|support the requested|not supported/i.test(message)
+        ) {
+          throw new UnsupportedFormatError(message);
+        }
         // Falhas passageiras do provedor: tenta de novo
         if ((status === 408 || status >= 500) && attempt < 2) {
           await this.sleep(1000 * 3 ** attempt);
@@ -251,25 +292,25 @@ export class OpenRouterProvider implements AiProvider {
       }
 
       const choice = data.choices?.[0];
-      if (choice?.message?.refusal) throw new AiRefusalError(`A IA recusou a tarefa "${task}": ${choice.message.refusal}`);
-      if (choice?.finish_reason === "content_filter") throw new AiRefusalError(`A IA recusou a tarefa "${task}" (filtro de conteúdo).`);
-      if (choice?.finish_reason === "length") throw new AiError(`Resposta da IA cortada por limite de tokens na tarefa "${task}".`);
-      return choice?.message?.content ?? "";
+      if (!choice?.message) throw new AiError(`O OpenRouter devolveu uma resposta vazia na tarefa "${task}".`);
+      if (choice.message.refusal) throw new AiRefusalError(`A IA recusou a tarefa "${task}": ${choice.message.refusal}`);
+      if (choice.finish_reason === "content_filter") throw new AiRefusalError(`A IA recusou a tarefa "${task}" (filtro de conteúdo).`);
+      if (choice.finish_reason === "length") throw new AiError(`Resposta da IA cortada por limite de tokens na tarefa "${task}".`);
+      return choice.message.content ?? "";
     }
   }
 
-  /** Quanto esperar num 429 (Retry-After em segundos ou X-RateLimit-Reset em ms). null = não informado. */
-  private rateLimitWait(res: Response): number | null {
-    const retryAfter = Number(res.headers.get("retry-after"));
+  /**
+   * Quanto esperar num 429: Retry-After (segundos) ou X-RateLimit-Reset (ms) — no cabeçalho ou, quando o
+   * limite é do provedor do modelo, em error.metadata.headers. null = não informado.
+   */
+  private rateLimitWait(res: Response, error: ChatResponse["error"]): number | null {
+    const meta = ((error?.metadata as Record<string, unknown> | undefined)?.headers ?? {}) as Record<string, unknown>;
+    const pick = (name: string) => res.headers.get(name) ?? meta[name] ?? meta[name.toLowerCase()] ?? null;
+    const retryAfter = Number(pick("Retry-After"));
     if (Number.isFinite(retryAfter) && retryAfter > 0) return retryAfter * 1000;
-    const reset = Number(res.headers.get("x-ratelimit-reset"));
+    const reset = Number(pick("X-RateLimit-Reset"));
     if (Number.isFinite(reset) && reset > 0) return Math.max(0, reset - this.now());
     return null;
-  }
-
-  private resetTime(res: Response): string | null {
-    const reset = Number(res.headers.get("x-ratelimit-reset"));
-    if (!Number.isFinite(reset) || reset <= this.now()) return null;
-    return new Date(reset).toISOString().slice(11, 16) + " UTC";
   }
 }

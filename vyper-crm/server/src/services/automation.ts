@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-o
 import type { AppContext } from "../context.js";
 import { enrollments, leads, scheduledMessages, sequences, type Lead, type Message, type Sequence } from "../db/schema.js";
 import { getSettings, type AppSettings } from "../settings.js";
+import { AiRateLimitError } from "../ai/errors.js";
 import { composeFollowup } from "./ai-flows.js";
 import { addActivity, getLead, HttpError } from "./leads.js";
 import { sendToLead, whatsAppTarget } from "./messaging.js";
@@ -126,7 +127,8 @@ export function isWithinSendWindow(settings: AppSettings, now: Date, timezone: s
   return start <= end ? current >= start && current < end : current >= start || current < end;
 }
 
-async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings: AppSettings): Promise<void> {
+/** "ai_limit" = acabou a cota do dia da IA (o agendador para a rodada para não gastar pedidos à toa). */
+async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings: AppSettings): Promise<"ai_limit" | void> {
   const [row] = await ctx.db
     .select({ e: enrollments, s: sequences, l: leads })
     .from(enrollments)
@@ -189,6 +191,23 @@ async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings
     await sendToLead(ctx, l.id, text, { author: "automation" });
     await addActivity(ctx.db, l.id, "followup_sent", `Follow-up "${s.name}" — passo ${e.stepIndex + 1} enviado`);
   } catch (err) {
+    if (err instanceof AiRateLimitError) {
+      // Sem cota da IA agora: o mesmo passo volta para a fila (o follow-up não se perde)
+      const wait = err.daily ? Math.max(err.retryAfterMs ?? 60 * MINUTE, 5 * MINUTE) : 15 * MINUTE;
+      await ctx.db
+        .update(enrollments)
+        .set({ nextRunAt: new Date(ctx.now().getTime() + wait), updatedAt: ctx.now() })
+        .where(
+          and(
+            eq(enrollments.id, e.id),
+            eq(enrollments.status, "active"),
+            eq(enrollments.stepIndex, e.stepIndex),
+            isNull(enrollments.nextRunAt),
+          ),
+        );
+      ctx.log.warn({ enrollmentId: e.id, daily: err.daily }, "limite da IA: passo da automação reagendado");
+      return err.daily ? "ai_limit" : undefined;
+    }
     ctx.log.warn({ err: String(err), enrollmentId: e.id }, "falha ao executar passo da automação");
     await addActivity(ctx.db, l.id, "followup_failed", `Falha no follow-up "${s.name}": ${(err as Error).message}`);
   }
@@ -248,7 +267,9 @@ export async function runSchedulerTick(ctx: AppContext): Promise<{ steps: number
     )
     .orderBy(asc(enrollments.nextRunAt))
     .limit(50);
-  for (const { id } of due) await runEnrollmentStep(ctx, id, settings);
+  for (const { id } of due) {
+    if ((await runEnrollmentStep(ctx, id, settings)) === "ai_limit") break;
+  }
 
   return { steps: due.length, scheduled: dueScheduled.length };
 }

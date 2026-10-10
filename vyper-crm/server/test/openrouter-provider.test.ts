@@ -5,7 +5,7 @@ import { ClaudeProvider, createAiProvider, DisabledAi, FallbackAi, type AiConfig
 import { copilotSchema, qualifySchema, replySchema } from "../src/ai/schemas.js";
 import { loadConfig } from "../src/config.js";
 
-type Reply = { status?: number; body?: unknown; headers?: Record<string, string> } | Error;
+type Reply = { status?: number; body?: unknown; headers?: Record<string, string>; brokenBody?: boolean } | Error;
 
 /** fetch falso: devolve as respostas na ordem e guarda os pedidos. */
 function fakeOpenRouter(replies: Reply[]) {
@@ -14,6 +14,11 @@ function fakeOpenRouter(replies: Reply[]) {
     requests.push({ url: String(url), headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
     const r = replies.shift() ?? { body: completion("{}") };
     if (r instanceof Error) throw r;
+    if (r.brokenBody) {
+      // 200 chega logo; o corpo cai no meio (timeout ou conexão perdida durante a geração)
+      const stream = new ReadableStream({ start: (c) => c.error(new Error("The operation was aborted due to timeout")) });
+      return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+    }
     return new Response(JSON.stringify(r.body ?? {}), {
       status: r.status ?? 200,
       headers: { "content-type": "application/json", ...(r.headers ?? {}) },
@@ -117,7 +122,36 @@ describe("OpenRouterProvider", () => {
     const limited = { status: 429, body: { error: { code: 429, message: "Rate limit exceeded" } }, headers: { "retry-after": "3" } };
     const fake = fakeOpenRouter([limited, { body: completion(okReply) }]);
     expect((await provider(fake).generate(req)).reply).toBe("Oi!");
-    expect(fake.sleeps).toEqual([3000]);
+    expect(fake.sleeps).toEqual([3250]);
+  });
+
+  it("limite por minuto com reset em até 1 minuto: espera e tenta de novo (não é o limite do dia)", async () => {
+    const now = Date.parse("2026-10-10T12:00:00Z");
+    const limited = { status: 429, body: { error: { code: 429, message: "Rate limit exceeded: free-models-per-min" } }, headers: { "x-ratelimit-reset": String(now + 45_000) } };
+    const fake = fakeOpenRouter([limited, { body: completion(okReply) }]);
+    expect((await provider(fake).generate(req)).reply).toBe("Oi!");
+    expect(fake.sleeps).toEqual([45_250]);
+  });
+
+  it("limite do provedor do modelo: o reset pode vir no corpo (metadata.headers)", async () => {
+    const now = Date.parse("2026-10-10T12:00:00Z");
+    const limited = {
+      status: 429,
+      body: { error: { code: 429, message: "Provider returned error", metadata: { headers: { "X-RateLimit-Reset": String(now + 30_000) } } } },
+    };
+    const fake = fakeOpenRouter([limited, { body: completion(okReply) }]);
+    expect((await provider(fake).generate(req)).reply).toBe("Oi!");
+    expect(fake.sleeps).toEqual([30_250]);
+  });
+
+  it("ocupado o tempo todo: desiste com erro passageiro (não diz que acabou a cota do dia)", async () => {
+    const busy = () => ({ status: 429, body: { error: { code: 429, message: "temporarily rate-limited upstream" } } });
+    const fake = fakeOpenRouter([busy(), busy(), busy()]);
+    const err = await provider(fake).generate(req).catch((e) => e);
+    expect(err).toBeInstanceOf(AiRateLimitError);
+    expect(err.daily).toBe(false);
+    expect(err.message).toContain("ocupado");
+    expect(fake.sleeps).toEqual([5_250, 15_250]);
   });
 
   it("limite do dia: não fica esperando, avisa quando libera", async () => {
@@ -130,7 +164,8 @@ describe("OpenRouterProvider", () => {
     const fake = fakeOpenRouter([limited]);
     const err = await provider(fake).generate(req).catch((e) => e);
     expect(err).toBeInstanceOf(AiRateLimitError);
-    expect(err.message).toContain("50 por dia");
+    expect(err.daily).toBe(true);
+    expect(err.message).toContain("50 pedidos por dia");
     expect(err.message).toContain("00:00 UTC");
     expect(fake.sleeps).toEqual([]);
   });
@@ -139,7 +174,7 @@ describe("OpenRouterProvider", () => {
     const limited = { status: 429, body: { error: { code: 429, message: "upstream rate limited" } } };
     const fake = fakeOpenRouter([limited, { body: completion(okReply) }]);
     expect((await provider(fake).generate(req)).reply).toBe("Oi!");
-    expect(fake.sleeps).toEqual([5000]);
+    expect(fake.sleeps).toEqual([5250]);
   });
 
   it("erro no corpo de uma resposta 200 e falha passageira: tenta de novo", async () => {
@@ -156,16 +191,45 @@ describe("OpenRouterProvider", () => {
     const cases: Array<[Reply, RegExp]> = [
       [{ status: 401, body: { error: { code: 401, message: "No auth credentials found" } } }, /OPENROUTER_API_KEY inválida/],
       [{ status: 402, body: { error: { code: 402, message: "Insufficient credits" } } }, /sem saldo/],
+      [{ status: 404, body: { error: { code: 404, message: "No endpoints found matching your data policy" } } }, /settings\/privacy/],
       [
         { status: 404, body: { error: { code: 404, message: "No endpoints found matching your data policy (Free model publication)" } } },
-        /settings\/privacy/,
+        /PUBLICAR/,
       ],
+      [{ status: 400, body: { error: { code: 400, message: "foo/bar:free is not a valid model ID" } } }, /not a valid model ID/],
+      [{ status: 400, body: { error: { code: 400, message: "This endpoint's maximum context length is 65536 tokens" } } }, /context length/],
     ];
     for (const [reply, msg] of cases) {
       const fake = fakeOpenRouter([reply]);
       await expect(provider(fake).generate(req)).rejects.toThrow(msg);
       expect(fake.requests).toHaveLength(1); // não insiste nem troca de formato
     }
+  });
+
+  it("corpo cortado numa resposta 200: avisa sem repetir o pedido nem trocar de formato", async () => {
+    const fake = fakeOpenRouter([{ brokenBody: true }]);
+    await expect(provider(fake).generate(req)).rejects.toThrow(/não terminou a resposta/);
+    expect(fake.requests).toHaveLength(1);
+  });
+
+  it("resposta 200 sem escolhas: erro claro", async () => {
+    const fake = fakeOpenRouter([{ body: { id: "gen-1", choices: [] } }]);
+    await expect(provider(fake).generate(req)).rejects.toThrow(/resposta vazia/);
+  });
+
+  it("conteúdo vazio: pede de novo sem mandar uma mensagem vazia do assistente", async () => {
+    const fake = fakeOpenRouter([{ body: completion("") }, { body: completion(okReply) }]);
+    expect((await provider(fake).generate(req)).reply).toBe("Oi!");
+    const second = fake.requests[1]!.body.messages as Array<{ role: string; content: string }>;
+    expect(second.some((m) => m.role === "assistant")).toBe(false);
+    expect(second.at(-1)!.content).toContain("vazia");
+  });
+
+  it("erro na correção (invalid_prompt) não troca de formato", async () => {
+    const invalid = { status: 400, body: { error: { code: 400, message: "Invalid prompt", metadata: { error_type: "invalid_prompt" } } } };
+    const fake = fakeOpenRouter([{ body: completion("não sei") }, invalid]);
+    await expect(provider(fake).generate(req)).rejects.toThrow(AiError);
+    expect(fake.requests).toHaveLength(2);
   });
 
   it("recusa e corte por tamanho", async () => {
@@ -205,6 +269,8 @@ describe("escolha da IA", () => {
     expect(loadConfig({ AI_PROVIDER: " OpenRouter " }).AI_PROVIDER).toBe("openrouter");
     expect(loadConfig({ AI_PROVIDER: "claude" }).AI_PROVIDER).toBe("anthropic");
     expect(loadConfig({}).OPENROUTER_MODEL).toBe("openrouter/free");
+    expect(loadConfig({ OPENROUTER_MODEL: "" }).OPENROUTER_MODEL).toBe("openrouter/free");
+    expect(loadConfig({ OPENROUTER_MODEL: " google/gemma-4-31b-it:free " }).OPENROUTER_MODEL).toBe("google/gemma-4-31b-it:free");
     expect(() => loadConfig({ AI_PROVIDER: "gpt" })).toThrow(/AI_PROVIDER/);
   });
 
@@ -217,5 +283,11 @@ describe("escolha da IA", () => {
     expect(warned).toHaveLength(1);
     const refused = new FallbackAi(failing(new AiRefusalError("não")), backup);
     await expect(refused.generate(req)).rejects.toThrow(AiRefusalError);
+    // Principal sem cota e reserva também falhou: vale o limite (o bot passa a conversa para um humano)
+    const both = new FallbackAi(failing(new AiRateLimitError("cota", { daily: true })), failing(new Error("Claude sem crédito")));
+    const err = await both.generate(req).catch((e) => e);
+    expect(err).toBeInstanceOf(AiRateLimitError);
+    expect(err.daily).toBe(true);
+    expect(err.message).toContain("Claude sem crédito");
   });
 });

@@ -45,7 +45,8 @@ const envSchema = z.object({
   AI_MODEL: z.string().default("claude-opus-5-5"),
   OPENROUTER_API_KEY: z.string().default(""),
   // openrouter/free = escolhe entre os modelos gratuitos disponíveis no momento
-  OPENROUTER_MODEL: z.string().trim().min(1).default("openrouter/free"),
+  // (vazio no .env = padrão)
+  OPENROUTER_MODEL: z.preprocess((v) => (typeof v === "string" && v.trim() ? v.trim() : undefined), z.string().default("openrouter/free")),
   // Outros modelos (separados por vírgula) que o OpenRouter tenta se o principal falhar
   OPENROUTER_FALLBACK_MODELS: z.string().default(""),
 

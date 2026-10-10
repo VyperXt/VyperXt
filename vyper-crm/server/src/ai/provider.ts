@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import type { z } from "zod";
-import { AiError, AiRefusalError, AiUnavailableError } from "./errors.js";
+import { AiError, AiRateLimitError, AiRefusalError, AiUnavailableError } from "./errors.js";
 import { OpenRouterProvider } from "./openrouter.js";
 
 export { AiError, AiRateLimitError, AiRefusalError, AiUnavailableError } from "./errors.js";
@@ -110,7 +110,20 @@ export class FallbackAi implements AiProvider {
     } catch (err) {
       if (err instanceof AiRefusalError) throw err;
       this.onFallback(err);
-      return this.secondary.generate(req);
+      try {
+        return await this.secondary.generate(req);
+      } catch (err2) {
+        // A reserva também falhou: se a principal estava sem cota, isso é o que importa (o bot passa a
+        // conversa para um humano e o painel mostra o limite)
+        if (err instanceof AiRateLimitError && !(err2 instanceof AiRefusalError)) {
+          throw new AiRateLimitError(`${err.message} A IA reserva também falhou: ${err2 instanceof Error ? err2.message : String(err2)}`, {
+            daily: err.daily,
+            retryAfterMs: err.retryAfterMs,
+            cause: err2,
+          });
+        }
+        throw err2;
+      }
     }
   }
 }

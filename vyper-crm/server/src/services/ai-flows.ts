@@ -70,7 +70,11 @@ export function unansweredInbound(history: Message[]): Message | undefined {
 }
 
 /** Bot: responde o lead sozinho e, quando necessário, passa a conversa para um humano. */
-export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ sent: boolean; handoff: boolean }> {
+export async function runAutoReply(
+  ctx: AppContext,
+  leadId: number,
+  opts: { attempt?: number } = {},
+): Promise<{ sent: boolean; handoff: boolean }> {
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
   const history = await getConversation(ctx, leadId);
@@ -88,12 +92,28 @@ export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ s
       effort: "low",
     });
   } catch (err) {
-    // Acabou o limite de uso da IA (ex.: plano gratuito do OpenRouter): ninguém responderia o lead,
-    // então a conversa passa para um humano, com aviso no painel
     if (!(err instanceof AiRateLimitError)) throw err;
-    const current = await getLead(ctx.db, leadId);
-    if (current.chatMode !== "bot") return { sent: false, handoff: false };
-    await handoffToHuman(ctx, leadId, "limite de uso da IA atingido — responda você");
+    // Enquanto esperava, alguém respondeu ou assumiu a conversa? Então ninguém está esperando o bot
+    if (!(await botStillOwesReply(ctx, leadId, target.id))) return { sent: false, handoff: false };
+    const attempt = opts.attempt ?? 0;
+    if (!err.daily && attempt < 2) {
+      // Passageiro (limite por minuto, modelo gratuito ocupado): tenta de novo daqui a pouco, sem tirar
+      // a conversa do bot. Se já há uma rodada marcada (o lead escreveu de novo), ela cuida disso.
+      if (!ctx.jobs.hasPending(`lead:${leadId}`)) {
+        const delay = ctx.aiDelayOverrideMs ?? Math.min(Math.max(err.retryAfterMs ?? 60_000, 15_000), 120_000);
+        ctx.jobs.schedule(`lead:${leadId}`, delay, async () => {
+          await runAutoReply(ctx, leadId, { attempt: attempt + 1 });
+        });
+      }
+      return { sent: false, handoff: false };
+    }
+    // Acabou a cota do dia (ex.: plano gratuito do OpenRouter) ou a IA segue ocupada: para nenhum lead
+    // ficar sem resposta, a conversa passa para um humano, com aviso no painel
+    await handoffToHuman(
+      ctx,
+      leadId,
+      err.daily ? "limite diário da IA atingido — responda você" : "IA ocupada há alguns minutos — responda você",
+    );
     return { sent: false, handoff: true };
   }
 
@@ -124,6 +144,16 @@ export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ s
     if (settings.copilot.enabled) await runCopilot(ctx, leadId).catch(() => {});
   }
   return { sent, handoff: output.handoff };
+}
+
+async function botStillOwesReply(ctx: AppContext, leadId: number, targetId: number): Promise<boolean> {
+  const since = await ctx.db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.leadId, leadId), gte(messages.id, targetId)))
+    .orderBy(asc(messages.id));
+  const current = await getLead(ctx.db, leadId);
+  return Boolean(unansweredInbound(since)) && current.chatMode === "bot" && !current.optedOut;
 }
 
 async function handoffToHuman(ctx: AppContext, leadId: number, reason: string): Promise<void> {

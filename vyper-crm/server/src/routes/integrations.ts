@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, lt, or, sql, type SQL } fr
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
+import { AiError, AiRefusalError } from "../ai/errors.js";
 import { leads, sequences, stages, type Lead } from "../db/schema.js";
 import { HttpError, idParam, parse } from "../http.js";
 import { asPhoneInput, normalizePhone } from "../lib/phone.js";
@@ -93,7 +94,19 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
       created = true;
     }
 
-    if (body.qualify && ctx.ai.enabled) lead = await runQualification(ctx, lead.id);
+    // Qualificação é um extra: se a IA falhar (ex.: limite do plano gratuito), o lead já foi salvo e as
+    // boas-vindas e a automação seguem normalmente
+    let qualify: { ok: boolean; error?: string } | undefined;
+    if (body.qualify && ctx.ai.enabled) {
+      try {
+        lead = await runQualification(ctx, lead.id);
+        qualify = { ok: true };
+      } catch (err) {
+        if (!(err instanceof AiError || err instanceof AiRefusalError)) throw err;
+        ctx.log.warn({ err: err.message, leadId: lead.id }, "qualificação via integração falhou");
+        qualify = { ok: false, error: err.message };
+      }
+    }
 
     let welcome: { sent: boolean; error?: string } | undefined;
     if (body.welcomeMessage?.trim() && lead.phone) {
@@ -107,7 +120,7 @@ export async function integrationRoutes(app: FastifyInstance, ctx: AppContext) {
     }
     if (body.sequenceId) await enroll(ctx, lead.id, body.sequenceId, "integração");
 
-    return { created, lead: await getLead(db, lead.id), welcome };
+    return { created, lead: await getLead(db, lead.id), welcome, qualify };
   });
 
   app.get("/api/integrations/leads", async (req) => {
