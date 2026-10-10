@@ -1,5 +1,6 @@
 // Testes de regressão da 2ª rodada de revisão do PR #1.
 import { readFileSync } from "node:fs";
+import { AiRateLimitError } from "../src/ai/errors.js";
 import { asc, eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { activities, leads, messages, sequences, stages, users, type Message } from "../src/db/schema.js";
@@ -518,5 +519,21 @@ describe("3ª rodada", () => {
     expect(normalizePhone("+54 11 15 2345-6789")).toBe("5491123456789");
     expect(normalizePhone("+54 341 15 234-5678")).toBe("5493412345678");
     expect(normalizePhone("+54 9 11 2345-6789")).toBe("5491123456789");
+  });
+});
+
+describe("IA gratuita (OpenRouter)", () => {
+  it("limite de uso acabou: a conversa passa para um humano em vez de ficar sem resposta", async () => {
+    env.ai.handlers.reply = () => {
+      throw new AiRateLimitError("Limite de uso do OpenRouter atingido");
+    };
+    await inbound("5511900008888", "oi, quanto custa?");
+    await env.settle();
+    const [lead] = await allLeads();
+    expect(lead!.chatMode).toBe("human");
+    expect(env.eventsOf("lead.handoff")[0]!.body.data.reason).toContain("limite de uso");
+    expect(env.wa.sent).toHaveLength(0);
+    const timeline = await env.ctx.db.select().from(activities).where(eq(activities.leadId, lead!.id));
+    expect(timeline.some((a) => a.type === "handoff")).toBe(true);
   });
 });

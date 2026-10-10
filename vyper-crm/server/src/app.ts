@@ -5,7 +5,7 @@ import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import Fastify, { LogController, type FastifyBaseLogger, type FastifyError } from "fastify";
-import { AiRefusalError, AiUnavailableError } from "./ai/provider.js";
+import { AiError, AiRateLimitError, AiRefusalError, AiUnavailableError } from "./ai/errors.js";
 import { trustProxyValue } from "./config.js";
 import type { AppContext } from "./context.js";
 import { claimsOf, HttpError, sessionUser, type SessionClaims } from "./http.js";
@@ -74,6 +74,11 @@ export async function buildApp(ctx: AppContext, opts: BuildOptions = {}) {
     if (err instanceof HttpError) return reply.code(err.statusCode).send({ error: err.message });
     if (err instanceof AiUnavailableError) return reply.code(503).send({ error: err.message });
     if (err instanceof AiRefusalError) return reply.code(422).send({ error: err.message });
+    if (err instanceof AiRateLimitError) return reply.code(429).send({ error: err.message });
+    if (err instanceof AiError) {
+      req.log.warn({ err: err.message }, "falha da IA");
+      return reply.code(502).send({ error: err.message });
+    }
     if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: err.message });
     req.log.error({ err }, "erro inesperado");
     return reply.code(500).send({ error: "Erro interno. Veja os logs do servidor." });
