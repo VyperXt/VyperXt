@@ -50,6 +50,11 @@ export class KeyedRunner {
     this.running.set(key, run);
   }
 
+  /** Já há uma execução marcada (esperando o atraso ou na fila) para esta chave? */
+  hasPending(key: string): boolean {
+    return this.timers.has(key) || this.queued.has(key);
+  }
+
   /** Aguarda tudo terminar (usado nos testes e no desligamento). */
   async drain(): Promise<void> {
     while (this.timers.size > 0 || this.running.size > 0 || this.queued.size > 0) {

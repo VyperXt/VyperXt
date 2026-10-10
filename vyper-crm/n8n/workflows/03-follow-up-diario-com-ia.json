@@ -4,7 +4,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Follow-up diário com IA\n\nBusca leads sem conversa há X horas (só quem tem WhatsApp, não pediu para sair e está em etapa aberta). Para cada um, a **IA escreve uma mensagem personalizada** com base no histórico — e pode decidir **não enviar** se o lead já disse que não tem interesse.\n\nQuem recebeu ganha a etiqueta `follow-up-n8n` e não recebe de novo. Se o envio falhar (número sem WhatsApp, por exemplo) ou a IA decidir não mandar, o lead ganha `follow-up-n8n-pulado` e sai da fila (senão ele ocuparia a lista todo dia). Para tentar de novo, tire a etiqueta no CRM.\n\n💡 Dica: o CRM também tem automações nativas em **Automações**. Use este workflow quando quiser lógica própria.",
+        "content": "## Follow-up diário com IA\n\nBusca leads sem conversa há X horas (só quem tem WhatsApp, não pediu para sair e está em etapa aberta). Para cada um, a **IA escreve uma mensagem personalizada** com base no histórico — e pode decidir **não enviar** se o lead já disse que não tem interesse.\n\nQuem recebeu ganha a etiqueta `follow-up-n8n` e não recebe de novo. Se o envio falhar (número sem WhatsApp, por exemplo) ou a IA decidir não mandar, o lead ganha `follow-up-n8n-pulado` e sai da fila (senão ele ocuparia a lista todo dia). Para tentar de novo, tire a etiqueta no CRM. Se o erro for o limite de uso da IA (429, comum no plano gratuito do OpenRouter), o lead não é marcado e entra na próxima rodada.\n\nOs envios saem um a cada 4 s (cabe no limite de 20 por minuto dos modelos gratuitos). No plano gratuito (50 pedidos por dia, divididos com o bot), diminua o `limit=50` em **Buscar leads parados**.\n\n💡 Dica: o CRM também tem automações nativas em **Automações**. Use este workflow quando quiser lógica própria.",
         "height": 360,
         "width": 600
       },
@@ -165,7 +165,14 @@
             }
           ]
         },
-        "options": {},
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 4000
+            }
+          }
+        },
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ ai: true, instruction: $('Configuração').first().json.instrucao }) }}"
@@ -244,6 +251,40 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c41a7e2b-6d5f-4e3a-8b9c-0d1e2f3a4b5c",
+              "leftValue": "={{ $json.sent === false || !JSON.stringify($json.error ?? '').includes('429') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8d2f6b1e-4c3a-4f0b-9e7d-1a2b3c4d5e6f",
+      "name": "Pular de vez?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        100
+      ]
+    },
+    {
+      "parameters": {
         "method": "PATCH",
         "url": "={{ $('Configuração').first().json.crmUrl }}/api/integrations/leads/{{ $('Ainda não recebeu?').item.json.id }}",
         "sendHeaders": true,
@@ -265,7 +306,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1540,
+        1760,
         100
       ],
       "onError": "continueRegularOutput"
@@ -347,6 +388,17 @@
             "index": 0
           }
         ],
+        [
+          {
+            "node": "Pular de vez?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pular de vez?": {
+      "main": [
         [
           {
             "node": "Marcar como pulado",

@@ -1,6 +1,8 @@
+import type { z } from "zod";
 import { and, asc, desc, eq, gte } from "drizzle-orm";
 import type { AppContext } from "../context.js";
 import { copilotInsights, leads, messages, type Lead, type Message } from "../db/schema.js";
+import { AiRateLimitError } from "../ai/errors.js";
 import * as P from "../ai/prompts.js";
 import {
   copilotAskSchema,
@@ -20,7 +22,7 @@ import { addActivity, getLead, HttpError, listStages, stageOf, updateLead } from
 import { getConversation, sendToLead } from "./messaging.js";
 
 function ensureAi(ctx: AppContext) {
-  if (!ctx.ai.enabled) throw new HttpError(503, "IA desativada: configure ANTHROPIC_API_KEY no .env e reinicie.");
+  if (!ctx.ai.enabled) throw new HttpError(503, "IA desativada: configure ANTHROPIC_API_KEY ou OPENROUTER_API_KEY no .env e reinicie.");
 }
 
 /**
@@ -68,7 +70,11 @@ export function unansweredInbound(history: Message[]): Message | undefined {
 }
 
 /** Bot: responde o lead sozinho e, quando necessário, passa a conversa para um humano. */
-export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ sent: boolean; handoff: boolean }> {
+export async function runAutoReply(
+  ctx: AppContext,
+  leadId: number,
+  opts: { attempt?: number } = {},
+): Promise<{ sent: boolean; handoff: boolean }> {
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
   const history = await getConversation(ctx, leadId);
@@ -76,13 +82,40 @@ export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ s
   const target = unansweredInbound(history);
   if (!target) return { sent: false, handoff: false };
 
-  const output = await ctx.ai.generate({
-    task: "reply",
-    system: P.replySystem(settings),
-    prompt: P.replyPrompt(lead, await stageOf(ctx.db, lead), P.buildTranscript(history, ctx.config.APP_TIMEZONE)),
-    schema: replySchema,
-    effort: "low",
-  });
+  let output: z.infer<typeof replySchema>;
+  try {
+    output = await ctx.ai.generate({
+      task: "reply",
+      system: P.replySystem(settings),
+      prompt: P.replyPrompt(lead, await stageOf(ctx.db, lead), P.buildTranscript(history, ctx.config.APP_TIMEZONE)),
+      schema: replySchema,
+      effort: "low",
+    });
+  } catch (err) {
+    if (!(err instanceof AiRateLimitError)) throw err;
+    // Enquanto esperava, alguém respondeu ou assumiu a conversa? Então ninguém está esperando o bot
+    if (!(await botStillOwesReply(ctx, leadId, target.id))) return { sent: false, handoff: false };
+    const attempt = opts.attempt ?? 0;
+    if (!err.daily && attempt < 2) {
+      // Passageiro (limite por minuto, modelo gratuito ocupado): tenta de novo daqui a pouco, sem tirar
+      // a conversa do bot. Se já há uma rodada marcada (o lead escreveu de novo), ela cuida disso.
+      if (!ctx.jobs.hasPending(`lead:${leadId}`)) {
+        const delay = ctx.aiDelayOverrideMs ?? Math.min(Math.max(err.retryAfterMs ?? 60_000, 15_000), 120_000);
+        ctx.jobs.schedule(`lead:${leadId}`, delay, async () => {
+          await runAutoReply(ctx, leadId, { attempt: attempt + 1 });
+        });
+      }
+      return { sent: false, handoff: false };
+    }
+    // Acabou a cota do dia (ex.: plano gratuito do OpenRouter) ou a IA segue ocupada: para nenhum lead
+    // ficar sem resposta, a conversa passa para um humano, com aviso no painel
+    await handoffToHuman(
+      ctx,
+      leadId,
+      err.daily ? "limite diário da IA atingido — responda você" : "IA ocupada há alguns minutos — responda você",
+    );
+    return { sent: false, handoff: true };
+  }
 
   // Enquanto a IA pensava: o lead mandou outra mensagem (a próxima rodada responde tudo junto),
   // alguém respondeu ou assumiu a conversa? Então descarta.
@@ -107,12 +140,26 @@ export async function runAutoReply(ctx: AppContext, leadId: number): Promise<{ s
     }
   }
   if (output.handoff) {
-    await updateLead(ctx, leadId, { chatMode: "human" }, { reason: "handoff" });
-    await addActivity(ctx.db, leadId, "handoff", `IA passou a conversa para um humano: ${output.handoffReason || "sem motivo"}`);
-    ctx.events.emit("lead.handoff", { lead: await getLead(ctx.db, leadId), reason: output.handoffReason });
+    await handoffToHuman(ctx, leadId, output.handoffReason);
     if (settings.copilot.enabled) await runCopilot(ctx, leadId).catch(() => {});
   }
   return { sent, handoff: output.handoff };
+}
+
+async function botStillOwesReply(ctx: AppContext, leadId: number, targetId: number): Promise<boolean> {
+  const since = await ctx.db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.leadId, leadId), gte(messages.id, targetId)))
+    .orderBy(asc(messages.id));
+  const current = await getLead(ctx.db, leadId);
+  return Boolean(unansweredInbound(since)) && current.chatMode === "bot" && !current.optedOut;
+}
+
+async function handoffToHuman(ctx: AppContext, leadId: number, reason: string): Promise<void> {
+  await updateLead(ctx, leadId, { chatMode: "human" }, { reason: "handoff" });
+  await addActivity(ctx.db, leadId, "handoff", `IA passou a conversa para um humano: ${reason || "sem motivo"}`);
+  ctx.events.emit("lead.handoff", { lead: await getLead(ctx.db, leadId), reason });
 }
 
 /** Atualiza a ficha do lead (nome, interesse, nota, temperatura...) a partir da conversa. */

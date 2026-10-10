@@ -42,7 +42,7 @@ const events = new EventBus(async () => {
 const ctx: AppContext = {
   db,
   config,
-  ai: createAiProvider(config.ANTHROPIC_API_KEY, config.AI_MODEL),
+  ai: createAiProvider(config, (err) => logger.warn({ err: String(err) }, "IA principal falhou; usando a reserva")),
   wa: createWhatsAppProvider(config),
   events,
   jobs: new KeyedRunner((err, key) => logger.error({ err: String(err), key }, "falha em tarefa de IA")),
@@ -56,11 +56,17 @@ const webDist = process.env.WEB_DIST ?? fileURLToPath(new URL("../../web/dist", 
 const app = await buildApp(ctx, { logger, webDist });
 const stopScheduler = startScheduler(ctx, config.SCHEDULER_INTERVAL_MS);
 
-if (!ctx.ai.enabled) logger.warn("ANTHROPIC_API_KEY não configurada: recursos de IA desativados.");
+if (!ctx.ai.enabled) logger.warn("Nenhuma chave de IA (ANTHROPIC_API_KEY ou OPENROUTER_API_KEY): recursos de IA desativados.");
+if (config.OPENROUTER_API_KEY && /(^openrouter\/free$|:free$)/.test(config.OPENROUTER_MODEL)) {
+  logger.warn(
+    "OpenRouter com modelo gratuito: até 20 pedidos/min e 50/dia (1000/dia com US$ 10 em créditos), e os provedores " +
+      "gratuitos podem guardar as conversas. Veja 'IA gratuita (OpenRouter)' no README.",
+  );
+}
 
 await app.listen({ port: config.PORT, host: config.HOST });
 logger.info(
-  { whatsapp: ctx.wa.name, ai: ctx.ai.enabled ? config.AI_MODEL : "desativada" },
+  { whatsapp: ctx.wa.name, ai: ctx.ai.enabled ? ctx.ai.model : "desativada" },
   `CRM rodando em http://localhost:${config.PORT}`,
 );
 

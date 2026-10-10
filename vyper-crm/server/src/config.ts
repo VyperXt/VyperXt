@@ -32,8 +32,23 @@ const envSchema = z.object({
   META_APP_SECRET: z.string().default(""),
   META_GRAPH_VERSION: z.string().default("v23.0"),
 
+  // IA: Claude (Anthropic) e/ou OpenRouter (modelos gratuitos). Com as duas chaves, AI_PROVIDER escolhe a
+  // principal e a outra fica de reserva. auto = Claude se tiver a chave, senão OpenRouter.
+  AI_PROVIDER: z.preprocess(
+    (v) => {
+      const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+      return s === "claude" ? "anthropic" : s || "auto";
+    },
+    z.enum(["auto", "anthropic", "openrouter"]),
+  ),
   ANTHROPIC_API_KEY: z.string().default(""),
   AI_MODEL: z.string().default("claude-opus-5-5"),
+  OPENROUTER_API_KEY: z.string().default(""),
+  // openrouter/free = escolhe entre os modelos gratuitos disponíveis no momento
+  // (vazio no .env = padrão)
+  OPENROUTER_MODEL: z.preprocess((v) => (typeof v === "string" && v.trim() ? v.trim() : undefined), z.string().default("openrouter/free")),
+  // Outros modelos (separados por vírgula) que o OpenRouter tenta se o principal falhar
+  OPENROUTER_FALLBACK_MODELS: z.string().default(""),
 
   // Para onde o CRM envia eventos (lead.created, message.received...) — normalmente um Webhook do n8n
   N8N_WEBHOOK_URL: z.string().default(""),

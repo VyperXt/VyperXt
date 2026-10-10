@@ -80,7 +80,7 @@ export function DashboardPage() {
           <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
             <div>
-              {!d.aiEnabled && <p>A IA está desativada — coloque sua ANTHROPIC_API_KEY no arquivo .env.</p>}
+              {!d.aiEnabled && <p>A IA está desativada — coloque ANTHROPIC_API_KEY (Claude) ou OPENROUTER_API_KEY (tem modelos gratuitos) no arquivo .env.</p>}
               {d.whatsappProvider === "simulator" && (
                 <p>
                   WhatsApp em <b>modo simulador</b>. Para conectar seu número, veja <Link to="/configuracoes" className="underline">Configurações → WhatsApp</Link>.

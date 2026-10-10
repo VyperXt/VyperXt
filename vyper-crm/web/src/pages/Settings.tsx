@@ -129,7 +129,7 @@ export function SettingsPage() {
                 <Toggle checked={s.ai.autoQualify} onChange={(v) => up("ai", { autoQualify: v })} label="A IA atualiza nota, temperatura, interesse e resumo a cada mensagem" />
                 <Toggle checked={s.ai.autoMoveStage} onChange={(v) => up("ai", { autoMoveStage: v })} label="A IA pode avançar o lead no funil (nunca para Ganho/Perdido)" />
                 <p className="text-xs text-slate-500">
-                  Modelo: <code>{sys.aiModel || "IA desativada"}</code> (mude com a variável AI_MODEL)
+                  Modelo: <code>{sys.aiModel || "IA desativada"}</code> (mude no .env: AI_MODEL para o Claude, OPENROUTER_MODEL para o OpenRouter)
                 </p>
               </Card>
             </>

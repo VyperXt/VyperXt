@@ -103,7 +103,7 @@ export function CopilotPanel({ lead, onUseDraft, draft }: { lead: Lead; onUseDra
       <div className="scroll-thin flex-1 space-y-5 overflow-y-auto p-4">
         {!aiEnabled && (
           <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-            IA desativada. Configure <code>ANTHROPIC_API_KEY</code> no <code>.env</code> para ativar o copiloto.
+            IA desativada. Configure <code>ANTHROPIC_API_KEY</code> ou <code>OPENROUTER_API_KEY</code> no <code>.env</code> para ativar o copiloto.
           </p>
         )}
         {lead.chatMode === "bot" && aiEnabled && (

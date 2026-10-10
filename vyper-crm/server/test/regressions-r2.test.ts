@@ -1,15 +1,16 @@
 // Testes de regressão da 2ª rodada de revisão do PR #1.
 import { readFileSync } from "node:fs";
+import { AiRateLimitError } from "../src/ai/errors.js";
 import { asc, eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { activities, leads, messages, sequences, stages, users, type Message } from "../src/db/schema.js";
+import { activities, enrollments, leads, messages, sequences, stages, users, type Message } from "../src/db/schema.js";
 import { normalizePhone } from "../src/lib/phone.js";
 import { runAutoReply, unansweredInbound } from "../src/services/ai-flows.js";
-import { renderTemplate } from "../src/services/automation.js";
+import { renderTemplate, runSchedulerTick } from "../src/services/automation.js";
 import { createLead } from "../src/services/leads.js";
 import { handleIncoming, sendToLead } from "../src/services/messaging.js";
 import { resetUserPassword } from "../src/services/users.js";
-import { getSettings } from "../src/settings.js";
+import { getSettings, updateSettings } from "../src/settings.js";
 import { EvolutionProvider, parseEvolutionWebhook } from "../src/whatsapp/evolution.js";
 import { parseMetaWebhook } from "../src/whatsapp/meta.js";
 import { login, setup, type TestEnv } from "./helpers.js";
@@ -518,5 +519,98 @@ describe("3ª rodada", () => {
     expect(normalizePhone("+54 11 15 2345-6789")).toBe("5491123456789");
     expect(normalizePhone("+54 341 15 234-5678")).toBe("5493412345678");
     expect(normalizePhone("+54 9 11 2345-6789")).toBe("5491123456789");
+  });
+});
+
+describe("IA gratuita (OpenRouter)", () => {
+  const rateLimit = (daily: boolean) => () => {
+    throw new AiRateLimitError(daily ? "Limite diário do OpenRouter atingido" : "OpenRouter ocupado agora", { daily });
+  };
+
+  it("acabou a cota do dia: a conversa passa para um humano em vez de ficar sem resposta", async () => {
+    env.ai.handlers.reply = rateLimit(true);
+    await inbound("5511900008888", "oi, quanto custa?");
+    await env.settle();
+    const [lead] = await allLeads();
+    expect(lead!.chatMode).toBe("human");
+    expect(env.eventsOf("lead.handoff")[0]!.body.data.reason).toContain("limite diário");
+    expect(env.ai.callsOf("reply")).toHaveLength(1);
+    expect(env.wa.sent).toHaveLength(0);
+    const timeline = await env.ctx.db.select().from(activities).where(eq(activities.leadId, lead!.id));
+    expect(timeline.some((a) => a.type === "handoff")).toBe(true);
+  });
+
+  it("limite passageiro (por minuto, modelo ocupado): o bot tenta de novo e responde, sem passar para humano", async () => {
+    let calls = 0;
+    env.ai.handlers.reply = () => {
+      if (++calls === 1) throw new AiRateLimitError("OpenRouter ocupado agora", { daily: false });
+      return { reply: "Custa R$ 100.", handoff: false, handoffReason: "" };
+    };
+    await inbound("5511900009999", "oi, quanto custa?");
+    await env.settle();
+    const [lead] = await allLeads();
+    expect(lead!.chatMode).toBe("bot");
+    expect(env.wa.sent.map((m) => m.text)).toEqual(["Custa R$ 100."]);
+    expect(env.eventsOf("lead.handoff")).toHaveLength(0);
+  });
+
+  it("ocupado em todas as tentativas: depois de 2 novas tentativas passa para um humano", async () => {
+    env.ai.handlers.reply = rateLimit(false);
+    await inbound("5511900007070", "oi");
+    await env.settle();
+    const [lead] = await allLeads();
+    expect(env.ai.callsOf("reply")).toHaveLength(3);
+    expect(lead!.chatMode).toBe("human");
+    expect(env.eventsOf("lead.handoff")[0]!.body.data.reason).toContain("ocupada");
+  });
+
+  it("se alguém respondeu enquanto a IA esperava, não passa para humano", async () => {
+    await updateSettings(env.ctx.db, { bot: { pauseOnPhoneReply: false } });
+    env.ai.handlers.reply = async () => {
+      const [lead] = await allLeads();
+      await sendToLead(env.ctx, lead!.id, "Oi! Já te respondo o preço.", { author: "agent" });
+      throw new AiRateLimitError("Limite diário do OpenRouter atingido", { daily: true });
+    };
+    await inbound("5511900006060", "oi, quanto custa?");
+    await env.settle();
+    const [lead] = await allLeads();
+    expect(lead!.chatMode).toBe("bot");
+    expect(env.eventsOf("lead.handoff")).toHaveLength(0);
+  });
+
+  it("formulário do n8n: sem cota para qualificar, o lead ainda recebe as boas-vindas", async () => {
+    env.ai.handlers.qualify = rateLimit(true);
+    const app = await env.app();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/integrations/leads",
+      headers: { "x-api-key": "test-key" },
+      payload: { name: "Bia", phone: "11955556666", qualify: true, welcomeMessage: "Oi {{primeiro_nome}}!" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ created: true, welcome: { sent: true }, qualify: { ok: false } });
+    expect(env.wa.sent.map((m) => m.text)).toEqual(["Oi Bia!"]);
+    await app.close();
+  });
+
+  it("follow-up com IA sem cota: o passo volta para a fila e a rodada para", async () => {
+    const [seq] = await env.ctx.db.select().from(sequences).where(eq(sequences.trigger, "no_reply"));
+    await env.ctx.db.update(sequences).set({ active: true }).where(eq(sequences.id, seq!.id));
+    const a = await createLead(env.ctx, { phone: "11955557777", chatMode: "human" });
+    const b = await createLead(env.ctx, { phone: "11955558888", chatMode: "human" });
+    await sendToLead(env.ctx, a.id, "Conseguiu ver a proposta?", { author: "agent" });
+    await sendToLead(env.ctx, b.id, "Conseguiu ver a proposta?", { author: "agent" });
+    env.ai.handlers.followup = rateLimit(true);
+    env.advanceMinutes(60 * 25);
+    await runSchedulerTick(env.ctx);
+    const rows = await env.ctx.db.select().from(enrollments).orderBy(asc(enrollments.id));
+    expect(rows.map((r) => [r.status, r.stepIndex])).toEqual([
+      ["active", 0],
+      ["active", 0],
+    ]);
+    expect(rows[0]!.nextRunAt!.getTime()).toBeGreaterThan(env.ctx.now().getTime()); // reagendado
+    expect(env.ai.callsOf("followup")).toHaveLength(1); // a rodada parou no primeiro limite
+    const failed = await env.ctx.db.select().from(activities).where(eq(activities.type, "followup_failed"));
+    expect(failed).toHaveLength(0);
   });
 });
