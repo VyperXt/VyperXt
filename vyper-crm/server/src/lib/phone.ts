@@ -20,7 +20,21 @@ export function normalizePhone(
   if (raw.startsWith("00")) digits = digits.slice(2);
   if (!hasCountryCode && (digits.length === 10 || digits.length === 11)) digits = `55${digits}`;
   if (digits.length < 8 || digits.length > 15) return null;
-  return canonicalBrazilianMobile(digits);
+  return canonicalBrazilianMobile(canonicalArgentineMobile(digits));
+}
+
+/**
+ * Celular argentino no formato local, com o 15 depois do código de área (+54 11 15 2345-6789),
+ * vira o formato do WhatsApp, com o 9 depois do 54 (5491123456789). Código de área: 2 a 4 dígitos.
+ */
+function canonicalArgentineMobile(digits: string): string {
+  if (!/^54(?!9)\d{12}$/.test(digits)) return digits;
+  for (const areaLen of [2, 3, 4]) {
+    if (digits.slice(2 + areaLen, 4 + areaLen) === "15") {
+      return `549${digits.slice(2, 2 + areaLen)}${digits.slice(4 + areaLen)}`;
+    }
+  }
+  return digits;
 }
 
 /** 55 + DDD + celular de 8 dígitos (começando com 6–9) → insere o 9: 553199998888 → 5531999998888 */

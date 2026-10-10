@@ -118,7 +118,7 @@ export function PipelinePage() {
                       <TemperatureBadge value={lead.temperature} score={lead.score} />
                       <div className="flex items-center gap-2 text-xs text-slate-500">
                         {lead.value ? <span className="font-medium text-slate-700">{money(lead.value)}</span> : null}
-                        {lead.phone && (
+                        {(lead.phone || lead.waJid) && (
                           <Link to={`/conversas/${lead.id}`} className="flex items-center gap-0.5 hover:text-brand-700" title="Abrir conversa">
                             <MessageCircle className="size-3.5" />
                             {lead.unreadCount > 0 ? <b className="text-brand-700">{lead.unreadCount}</b> : timeAgo(lead.lastMessageAt)}

@@ -1,31 +1,39 @@
 /**
- * Conta senhas erradas por usuário numa janela de tempo (em memória).
- * Só usuários que existem entram aqui, então o mapa não cresce com e-mails inventados.
+ * Conta tentativas de login por conta numa janela de tempo (em memória; reiniciar o CRM zera).
+ * Para e-mails que não existem, use maxKeys (o mapa não cresce sem limite).
  */
 export class LoginFailures {
-  private byUser = new Map<number, number[]>();
+  private byUser = new Map<string, number[]>();
 
-  constructor(private opts: { max: number; windowMs: number }) {}
+  /** maxKeys: limite de chaves guardadas (as mais antigas saem primeiro) */
+  constructor(private opts: { max: number; windowMs: number; maxKeys?: number }) {}
 
-  private recent(userId: number, now: number): number[] {
-    const list = (this.byUser.get(userId) ?? []).filter((t) => now - t < this.opts.windowMs);
-    if (list.length) this.byUser.set(userId, list);
-    else this.byUser.delete(userId);
+  private recent(key: string, now: number): number[] {
+    const list = (this.byUser.get(key) ?? []).filter((t) => now - t < this.opts.windowMs);
+    if (list.length) this.byUser.set(key, list);
+    else this.byUser.delete(key);
     return list;
   }
 
   /** Segundos até poder tentar de novo (0 = liberado). */
-  retryAfterSeconds(userId: number, now: number): number {
-    const list = this.recent(userId, now);
+  retryAfterSeconds(key: string, now: number): number {
+    const list = this.recent(key, now);
     if (list.length < this.opts.max) return 0;
     return Math.max(1, Math.ceil((list[list.length - this.opts.max]! + this.opts.windowMs - now) / 1000));
   }
 
-  add(userId: number, now: number): void {
-    this.byUser.set(userId, [...this.recent(userId, now), now]);
+  add(key: string, now: number): void {
+    const list = [...this.recent(key, now), now];
+    this.byUser.delete(key); // reinsere no fim (a mais recente)
+    this.byUser.set(key, list);
+    const max = this.opts.maxKeys ?? Infinity;
+    for (const oldest of this.byUser.keys()) {
+      if (this.byUser.size <= max) break;
+      this.byUser.delete(oldest);
+    }
   }
 
-  clear(userId: number): void {
-    this.byUser.delete(userId);
+  clear(key: string): void {
+    this.byUser.delete(key);
   }
 }

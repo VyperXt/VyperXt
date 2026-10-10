@@ -154,7 +154,7 @@ export function LeadPage() {
           <Button variant="secondary" icon={<Sparkles className="size-4 text-violet-600" />} loading={qualify.isPending} onClick={() => qualify.mutate()}>
             Qualificar com IA
           </Button>
-          {lead.phone && (
+          {(lead.phone || lead.waJid) && (
             <Link to={`/conversas/${lead.id}`}>
               <Button icon={<MessageCircle className="size-4" />}>Conversa</Button>
             </Link>

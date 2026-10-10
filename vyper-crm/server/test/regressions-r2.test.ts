@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { asc, eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { leads, messages, sequences, stages, users, type Message } from "../src/db/schema.js";
+import { activities, leads, messages, sequences, stages, users, type Message } from "../src/db/schema.js";
 import { normalizePhone } from "../src/lib/phone.js";
 import { runAutoReply, unansweredInbound } from "../src/services/ai-flows.js";
 import { renderTemplate } from "../src/services/automation.js";
@@ -105,11 +105,13 @@ describe("contatos e telefones", () => {
     expect(lead).toMatchObject({ phone: null, waJid: "123456789012345@lid", waName: "Bia" });
     expect(env.wa.sent.at(-1)!.phone).toBe("123456789012345@lid");
 
-    // Depois o WhatsApp manda o mesmo contato já com o número: o lead é o mesmo e ganha o telefone
+    // Depois o mesmo contato escreve numa conversa endereçada pelo número (formato da Evolution 2.3.7:
+    // remoteJid = número, remoteJidAlt = LID): o lead é o mesmo e ganha o telefone
     const withPhone = parseEvolutionWebhook({
       event: "messages.upsert",
+      sender: "5511900000000@s.whatsapp.net",
       data: {
-        key: { remoteJid: "123456789012345@lid", remoteJidAlt: "5531988887777@s.whatsapp.net", fromMe: false, id: "L2" },
+        key: { remoteJid: "5531988887777@s.whatsapp.net", remoteJidAlt: "123456789012345@lid", addressingMode: "pn", fromMe: false, id: "L2" },
         message: { conversation: "meu número apareceu" },
       },
     });
@@ -358,5 +360,163 @@ describe("Evolution", () => {
     calls.length = 0;
     expect(await new EvolutionProvider({ ...opts, fetchImpl: fake(404) }).syncWebhook()).toBe("no_instance");
     expect(calls.some((c) => c.url.includes("/webhook/set"))).toBe(false);
+  });
+});
+
+describe("3ª rodada", () => {
+  it("login: rajada em paralelo não passa do limite da conta", async () => {
+    const proxied = await setup({ TRUST_PROXY: "true" });
+    const app = await proxied.app();
+    const results = await Promise.all(
+      Array.from({ length: 40 }, (_, i) =>
+        app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          headers: { "x-forwarded-for": `203.0.113.${i}` },
+          payload: { email: "admin@test.dev", password: "errada" },
+        }),
+      ),
+    );
+    const codes = results.map((r) => r.statusCode);
+    expect(codes.filter((c) => c === 401).length).toBeLessThanOrEqual(20);
+    expect(codes.filter((c) => c === 429).length).toBeGreaterThanOrEqual(20);
+    // Redefinir a senha pelo script libera a conta na hora
+    await resetUserPassword(proxied.ctx.db, "admin@test.dev", "novaSenha99");
+    const ok = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { "x-forwarded-for": "198.51.100.9" },
+      payload: { email: "admin@test.dev", password: "novaSenha99" },
+    });
+    expect(ok.statusCode).toBe(200);
+    await app.close();
+    await proxied.close();
+  });
+
+  it("login: quem erra a senha de propósito não tranca para fora quem já usa o CRM naquele navegador", async () => {
+    const proxied = await setup({ TRUST_PROXY: "true" });
+    const app = await proxied.app();
+    const login = (password: string, ip: string, device?: string, email = "admin@test.dev") =>
+      app.inject({ method: "POST", url: "/api/auth/login", headers: { "x-forwarded-for": ip }, payload: { email, password, device } });
+
+    // O admin já entrou antes neste navegador e guardou o sinal
+    const first = await login("senha123", "198.51.100.1");
+    const device = first.json().device as string;
+    expect(device).toMatch(/^\d+\.[\w-]+\.[\w-]+$/);
+
+    // Atacante trava a conta trocando de IP
+    for (let i = 0; i < 20; i++) await login("errada", `203.0.113.${i}`);
+    expect((await login("senha123", "198.51.100.2")).statusCode).toBe(429); // navegador novo: bloqueado
+    expect((await login("senha123", "198.51.100.1", device)).statusCode).toBe(200); // navegador de confiança: entra
+    // sinal forjado (outro usuário / assinatura errada) não vale
+    const forged = device.replace(/^\d+/, "999");
+    expect((await login("senha123", "198.51.100.3", forged)).statusCode).toBe(429);
+    expect((await login("senha123", "198.51.100.4", `${device}x`)).statusCode).toBe(429);
+
+    // E-mail que não existe responde igual (não revela quais e-mails existem)
+    const codes: number[] = [];
+    for (let i = 0; i < 21; i++) codes.push((await login("errada", `192.0.2.${i}`, undefined, "ninguem@x.dev")).statusCode);
+    expect(codes.slice(0, 20).every((c) => c === 401)).toBe(true);
+    expect(codes[20]).toBe(429);
+    await app.close();
+    await proxied.close();
+  });
+
+  it("login: IPv6 da mesma faixa /64 conta como um cliente só", async () => {
+    const proxied = await setup({ TRUST_PROXY: "true" });
+    const app = await proxied.app();
+    let last = 0;
+    for (let i = 1; i <= 11; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { "x-forwarded-for": `2001:db8:1:2::${i.toString(16)}` },
+        payload: { email: "admin@test.dev", password: "errada" },
+      });
+      last = res.statusCode;
+    }
+    expect(last).toBe(429);
+    await app.close();
+    await proxied.close();
+  });
+
+  it("Evolution: LID em remoteJidAlt (mensagem endereçada pelo número) também é guardado", () => {
+    const res = parseEvolutionWebhook({
+      event: "messages.upsert",
+      data: {
+        key: { remoteJid: "5531988887777@s.whatsapp.net", remoteJidAlt: "123456789012345:3@lid", fromMe: false, id: "P1" },
+        message: { conversation: "oi" },
+      },
+    });
+    expect(res.messages[0]).toMatchObject({ phone: "5531988887777", jid: "123456789012345@lid" });
+  });
+
+  it("Evolution: em mensagem sua, os campos alternativos são seus (não do contato)", () => {
+    const sender = "5511900000000@s.whatsapp.net";
+    // Você responde pelo celular numa conversa por LID: o LID é do contato, o número alternativo é o seu
+    const lidChat = parseEvolutionWebhook({
+      event: "messages.upsert",
+      sender,
+      data: { key: { remoteJid: "123456789012345@lid", remoteJidAlt: sender, fromMe: true, id: "M1" }, message: { conversation: "oi" } },
+    });
+    expect(lidChat.messages[0]).toMatchObject({ phone: null, jid: "123456789012345@lid", fromMe: true });
+    // Conversa pelo número: o remoteJidAlt é o SEU LID, não pode ir para o contato
+    const pnChat = parseEvolutionWebhook({
+      event: "messages.upsert",
+      sender,
+      data: { key: { remoteJid: "5531988887777@s.whatsapp.net", remoteJidAlt: "999999999999999@lid", fromMe: true, id: "M2" }, message: { conversation: "oi" } },
+    });
+    expect(pnChat.messages[0]).toMatchObject({ phone: "5531988887777", fromMe: true });
+    expect(pnChat.messages[0]!.jid).toBeUndefined();
+    // A Evolution trocou o contato pelo seu próprio número: não vira lead
+    const self = parseEvolutionWebhook({
+      event: "messages.upsert",
+      sender,
+      data: { key: { remoteJid: sender, remoteJidAlt: sender, fromMe: true, id: "M3" }, message: { conversation: "oi" } },
+    });
+    expect(self.messages).toHaveLength(0);
+  });
+
+  it("lead só com LID é unificado com o lead do telefone quando o número aparece", async () => {
+    const form = await createLead(env.ctx, { name: "Paula", phone: "(31) 98888-7777", source: "formulario", chatMode: "human" });
+    await inbound(null, "oi, sou eu", { jid: "123456789012345@lid", name: "Paula Zap" });
+    await env.settle();
+    expect(await allLeads()).toHaveLength(2);
+    await inbound("5531988887777", "agora com número", { jid: "123456789012345@lid" });
+    await env.settle();
+    const rows = await allLeads();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: form.id, phone: "5531988887777", waJid: "123456789012345@lid", name: "Paula", waName: "Paula Zap" });
+    const bodies = (await messagesOf(form.id)).map((m) => m.body);
+    expect(bodies).toEqual(expect.arrayContaining(["oi, sou eu", "agora com número"]));
+    const timeline = await env.ctx.db.select().from(activities).where(eq(activities.leadId, form.id));
+    expect(timeline.some((a) => a.type === "merged")).toBe(true);
+  });
+
+  it("lead antigo com o LID gravado no telefone é reaproveitado (sem duplicar)", async () => {
+    const [legacy] = await env.ctx.db.insert(leads).values({ phone: "123456789012345", source: "whatsapp" }).returning();
+    await inbound(null, "voltei", { jid: "123456789012345@lid" });
+    await env.settle();
+    const rows = await allLeads();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: legacy!.id, phone: null, waJid: "123456789012345@lid" });
+  });
+
+  it("com e sem o 9 já duplicados: a conversa continua no lead em que o contato escreveu", async () => {
+    const [legacy] = await env.ctx.db
+      .insert(leads)
+      .values({ phone: "553188887777", source: "whatsapp", chatMode: "human", lastInboundAt: new Date("2026-10-01T12:00:00Z") })
+      .returning();
+    // par criado por versões antigas (o formulário com o 9, o WhatsApp sem)
+    await env.ctx.db.insert(leads).values({ phone: "5531988887777", source: "formulario" });
+    await inbound(normalizePhone("553188887777@s.whatsapp.net"), "continuando");
+    await env.settle();
+    expect((await messagesOf(legacy!.id)).map((m) => m.body)).toContain("continuando");
+  });
+
+  it("Argentina: celular no formato local com 15 vira o formato do WhatsApp", () => {
+    expect(normalizePhone("+54 11 15 2345-6789")).toBe("5491123456789");
+    expect(normalizePhone("+54 341 15 234-5678")).toBe("5493412345678");
+    expect(normalizePhone("+54 9 11 2345-6789")).toBe("5491123456789");
   });
 });

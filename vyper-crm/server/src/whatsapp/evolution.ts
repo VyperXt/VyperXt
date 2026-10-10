@@ -173,6 +173,11 @@ const STATUS_MAP: Record<string, StatusUpdate["status"]> = {
   ERROR: "failed",
 };
 
+/** "123:4@lid" → "123@lid" (o sufixo é o aparelho, não o contato) */
+function stripDevice(jid: string): string {
+  return jid.replace(/:\d+(?=@)/, "");
+}
+
 /** Converte o corpo do webhook da Evolution API no formato interno do CRM. */
 export function parseEvolutionWebhook(payload: AnyRecord): ParsedWebhook {
   const result: ParsedWebhook = { messages: [], statuses: [] };
@@ -182,6 +187,8 @@ export function parseEvolutionWebhook(payload: AnyRecord): ParsedWebhook {
   const items: AnyRecord[] = Array.isArray(payload?.data) ? payload.data : payload?.data ? [payload.data] : [];
 
   if (event === "messages.upsert") {
+    // Número da própria instância (a Evolution manda em "sender" no envelope do webhook)
+    const owner = typeof payload?.sender === "string" ? normalizePhone(payload.sender, { international: true }) : null;
     for (const data of items) {
       const key = data.key ?? {};
       const remote: string = key.remoteJid ?? "";
@@ -189,19 +196,32 @@ export function parseEvolutionWebhook(payload: AnyRecord): ParsedWebhook {
       if (!remote || remote.endsWith("@g.us") || remote === "status@broadcast" || remote.endsWith("@newsletter")) continue;
       if (data.messageType === "protocolMessage" || data.message?.protocolMessage) continue;
       if (data.message?.reactionMessage) continue;
+      const fromMe = Boolean(key.fromMe);
       // Contatos com LID: o número real vem em remoteJidAlt/senderPn (quando o WhatsApp informa).
       // O LID não é telefone; sem o número, guardamos o LID e respondemos por ele.
+      // A Evolution troca remoteJid pelo número quando o conhece; numa conversa endereçada pelo número,
+      // o LID do contato vem em remoteJidAlt. Esses campos "alternativos" são de quem ENVIOU: numa
+      // mensagem sua eles são seus, não do contato, então só valem para mensagens recebidas.
       let lid: string | undefined;
       let pnJid = remote;
       if (remote.endsWith("@lid")) {
-        lid = remote.replace(/:\d+(?=@)/, "");
-        pnJid =
-          [key.remoteJidAlt, key.senderPn, data.senderPn].find(
-            (j): j is string => typeof j === "string" && j !== "" && !j.endsWith("@lid"),
-          ) ?? "";
+        lid = stripDevice(remote);
+        pnJid = fromMe
+          ? ""
+          : ([key.remoteJidAlt, key.senderPn, data.senderPn].find(
+              (j): j is string => typeof j === "string" && j !== "" && !j.endsWith("@lid"),
+            ) ?? "");
+      } else if (!fromMe && typeof key.remoteJidAlt === "string" && key.remoteJidAlt.endsWith("@lid")) {
+        lid = stripDevice(key.remoteJidAlt);
       }
       const phone = pnJid ? normalizePhone(pnJid, { international: true }) : null;
       if (!phone && !lid) continue;
+      // Conversa com o próprio número da instância ("sender"): acontece quando você responde pelo celular
+      // numa conversa por LID e a Evolution troca o contato pelo SEU número. Não dá para saber quem é o contato.
+      if (phone && owner && phone === owner) {
+        (result.skipped ??= []).push(`${key.id ?? "?"}: conversa com o próprio número da instância`);
+        continue;
+      }
       const { body, mediaType } = extractContent(data.message, data.messageType);
       if (!body) continue;
       const ts = Number(data.messageTimestamp);
@@ -212,7 +232,7 @@ export function parseEvolutionWebhook(payload: AnyRecord): ParsedWebhook {
         body,
         mediaType,
         externalId: key.id,
-        fromMe: Boolean(key.fromMe),
+        fromMe,
         timestamp: Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000) : undefined,
       } satisfies IncomingMessage);
     }

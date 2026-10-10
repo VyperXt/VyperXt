@@ -1,9 +1,21 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { isInsecureAdminPassword } from "../config.js";
 import type { AppContext } from "../context.js";
 import type { Db } from "../db/client.js";
-import { activities, leads, sequences, stages, users, type Lead, type Stage } from "../db/schema.js";
+import {
+  activities,
+  copilotInsights,
+  enrollments,
+  leads,
+  messages,
+  scheduledMessages,
+  sequences,
+  stages,
+  users,
+  type Lead,
+  type Stage,
+} from "../db/schema.js";
 import { normalizePhone, phoneVariants } from "../lib/phone.js";
 import { hashPassword } from "../lib/password.js";
 import { getSettings } from "../settings.js";
@@ -208,30 +220,115 @@ export interface WhatsAppContact {
   jid?: string | null;
 }
 
+/** Versões antigas do CRM gravavam o LID (só os dígitos) no campo telefone. */
+const lidDigits = (jid: string) => jid.split("@")[0]!;
+
+async function findLegacyLidLead(db: Db, jid: string): Promise<Lead | undefined> {
+  const [lead] = await db
+    .select()
+    .from(leads)
+    .where(and(eq(leads.phone, lidDigits(jid)), isNull(leads.waJid)));
+  return lead;
+}
+
 async function findLeadByContact(db: Db, contact: WhatsAppContact): Promise<Lead | undefined> {
   if (contact.phone) {
     const byPhone = await findLeadByPhone(db, contact.phone);
     if (byPhone) return byPhone;
   }
-  return contact.jid ? findLeadByJid(db, contact.jid) : undefined;
+  if (!contact.jid) return undefined;
+  return (await findLeadByJid(db, contact.jid)) ?? (await findLegacyLidLead(db, contact.jid));
 }
 
-/** Completa o telefone/LID que faltava no lead (ex.: contato que antes só mandava o LID). */
+/** Atualiza o lead; se outro lead já tiver o mesmo telefone/LID, só registra e segue. */
+async function tryUpdate(ctx: AppContext, lead: Lead, values: Partial<typeof leads.$inferInsert>): Promise<Lead> {
+  try {
+    const [updated] = await ctx.db.update(leads).set(values).where(eq(leads.id, lead.id)).returning();
+    return updated ?? lead;
+  } catch (err) {
+    ctx.log.warn({ err: String(err), leadId: lead.id }, "não foi possível completar o telefone/LID do lead");
+    return lead;
+  }
+}
+
+/**
+ * Completa o telefone/LID que faltava no lead. Se o LID estava num outro lead que só tinha o LID
+ * (o contato escreveu antes sem mostrar o número), os dois viram um só.
+ */
 async function linkContact(ctx: AppContext, lead: Lead, contact: WhatsAppContact): Promise<Lead> {
+  // Lead antigo com o LID no lugar do telefone: o LID vai para wa_jid e o telefone fica com o número real
+  if (contact.jid && !lead.waJid && lead.phone === lidDigits(contact.jid)) {
+    return tryUpdate(ctx, lead, { waJid: contact.jid, phone: contact.phone ?? null });
+  }
   let current = lead;
-  const fill: Array<Partial<typeof leads.$inferInsert>> = [];
-  if (contact.phone && !lead.phone) fill.push({ phone: contact.phone });
-  if (contact.jid && !lead.waJid) fill.push({ waJid: contact.jid });
-  for (const values of fill) {
-    try {
-      const [updated] = await ctx.db.update(leads).set(values).where(eq(leads.id, lead.id)).returning();
-      if (updated) current = updated;
-    } catch (err) {
-      // Outro lead já tem esse número/LID: mantém os dois como estão
-      ctx.log.warn({ err: String(err), leadId: lead.id }, "não foi possível completar o telefone/LID do lead");
-    }
+  if (contact.phone && !current.phone) current = await tryUpdate(ctx, current, { phone: contact.phone });
+  if (contact.jid && !current.waJid) {
+    const other = (await findLeadByJid(ctx.db, contact.jid)) ?? (await findLegacyLidLead(ctx.db, contact.jid));
+    const lidOnly = other && other.id !== current.id && (!other.phone || other.phone === lidDigits(contact.jid));
+    current = lidOnly
+      ? await mergeLeadInto(ctx, current, other, { waJid: contact.jid })
+      : await tryUpdate(ctx, current, { waJid: contact.jid });
   }
   return current;
+}
+
+const later = (a: Date | null, b: Date | null) => (!a ? b : !b ? a : a > b ? a : b);
+
+/**
+ * Junta dois leads do mesmo contato: conversa, linha do tempo, análises do copiloto, agendamentos e
+ * automações passam para `keep`; campos vazios de `keep` são completados com os de `drop`, que é apagado.
+ */
+export async function mergeLeadInto(
+  ctx: AppContext,
+  keep: Lead,
+  drop: Lead,
+  extra: Partial<typeof leads.$inferInsert> = {},
+): Promise<Lead> {
+  const merged = await ctx.db.transaction(async (tx) => {
+    // Trava o lead que vai sumir: mensagens chegando para ele ao mesmo tempo esperam o fim da junção
+    const [locked] = await tx.select().from(leads).where(eq(leads.id, drop.id)).for("update");
+    if (!locked) return undefined;
+    await tx.update(messages).set({ leadId: keep.id }).where(eq(messages.leadId, drop.id));
+    await tx.update(activities).set({ leadId: keep.id }).where(eq(activities.leadId, drop.id));
+    await tx.update(copilotInsights).set({ leadId: keep.id }).where(eq(copilotInsights.leadId, drop.id));
+    await tx.update(scheduledMessages).set({ leadId: keep.id }).where(eq(scheduledMessages.leadId, drop.id));
+    // Automações ativas do lead duplicado param (o lead que fica segue com as dele)
+    await tx
+      .update(enrollments)
+      .set({ status: "stopped", stopReason: "lead unificado", nextRunAt: null, updatedAt: ctx.now() })
+      .where(and(eq(enrollments.leadId, drop.id), eq(enrollments.status, "active")));
+    await tx.update(enrollments).set({ leadId: keep.id }).where(eq(enrollments.leadId, drop.id));
+    await tx.delete(leads).where(eq(leads.id, drop.id));
+    const [row] = await tx
+      .update(leads)
+      .set({
+        name: keep.name ?? locked.name,
+        waName: keep.waName ?? locked.waName,
+        email: keep.email ?? locked.email,
+        company: keep.company ?? locked.company,
+        interest: keep.interest ?? locked.interest,
+        budget: keep.budget ?? locked.budget,
+        timeline: keep.timeline ?? locked.timeline,
+        aiSummary: keep.aiSummary ?? locked.aiSummary,
+        notes: keep.notes ?? locked.notes,
+        value: keep.value ?? locked.value,
+        tags: [...new Set([...keep.tags, ...locked.tags])],
+        unreadCount: sql`${leads.unreadCount} + ${locked.unreadCount}`,
+        optedOut: keep.optedOut || locked.optedOut,
+        lastMessageAt: later(keep.lastMessageAt, locked.lastMessageAt),
+        lastInboundAt: later(keep.lastInboundAt, locked.lastInboundAt),
+        updatedAt: ctx.now(),
+        ...extra,
+      })
+      .where(eq(leads.id, keep.id))
+      .returning();
+    return row;
+  });
+  if (!merged) return tryUpdate(ctx, keep, extra);
+  await addActivity(ctx.db, keep.id, "merged", `Unificado com o lead #${drop.id} (mesmo contato do WhatsApp)`);
+  ctx.events.emit("lead.deleted", { leadId: drop.id });
+  ctx.events.emit("lead.updated", { lead: merged });
+  return merged;
 }
 
 /**
@@ -331,8 +428,12 @@ export async function findLeadByPhone(db: Db, phone: string, opts: { excludeId?:
   const variants = phoneVariants(phone);
   const rows = await db.select().from(leads).where(inArray(leads.phone, variants));
   const candidates = rows.filter((l) => l.id !== opts.excludeId);
-  // Prefere o número exatamente igual; senão a variante (ex.: o mesmo celular sem o 9)
-  return candidates.find((l) => l.phone === phone) ?? candidates[0];
+  // Se o mesmo contato existe com e sem o 9 (versões antigas criavam os dois), a conversa continua
+  // no lead em que o contato escreveu por último; empate → o número exatamente igual, depois o mais antigo.
+  const inbound = (l: Lead) => l.lastInboundAt?.getTime() ?? -1;
+  return candidates.sort(
+    (a, b) => inbound(b) - inbound(a) || Number(b.phone === phone) - Number(a.phone === phone) || a.id - b.id,
+  )[0];
 }
 
 export async function findLeadByJid(db: Db, jid: string): Promise<Lead | undefined> {

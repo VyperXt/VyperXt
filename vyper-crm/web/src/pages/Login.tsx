@@ -2,7 +2,7 @@ import { Bot } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "../components/ui";
-import { api, setToken } from "../lib/api";
+import { api, getDeviceToken, setDeviceToken, setToken } from "../lib/api";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -16,8 +16,11 @@ export function LoginPage() {
     setLoading(true);
     setError("");
     try {
-      const res = await api<{ token: string }>("/auth/login", { body: { email, password } });
+      const res = await api<{ token: string; device: string }>("/auth/login", {
+        body: { email, password, device: getDeviceToken(email) },
+      });
       setToken(res.token);
+      setDeviceToken(email, res.device);
       navigate("/");
     } catch (err) {
       setError((err as Error).message);

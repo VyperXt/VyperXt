@@ -17,6 +17,26 @@ export function setToken(token: string | null) {
   }
 }
 
+// "Este navegador já entrou nesta conta" (fica mesmo depois de sair): evita que alguém errando a
+// senha de propósito bloqueie o seu acesso
+const deviceKey = (email: string) => `vyper-crm-device:${email.trim().toLowerCase()}`;
+
+export function getDeviceToken(email: string): string | undefined {
+  try {
+    return localStorage.getItem(deviceKey(email)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function setDeviceToken(email: string, token: string | undefined) {
+  try {
+    if (token) localStorage.setItem(deviceKey(email), token);
+  } catch {
+    /* navegador sem storage */
+  }
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
