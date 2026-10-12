@@ -15,8 +15,13 @@ import { dashboardRoutes } from "./routes/dashboard.js";
 import { eventRoutes } from "./routes/events.js";
 import { integrationRoutes } from "./routes/integrations.js";
 import { leadRoutes } from "./routes/leads.js";
+import { playbookRoutes } from "./routes/playbooks.js";
+import { prospectingRoutes } from "./routes/prospecting.js";
+import { sampleRoutes } from "./routes/samples.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { webhookRoutes } from "./routes/webhooks.js";
+import { recoverInterruptedSearches } from "./services/prospecting.js";
+import { recoverInterruptedSamples } from "./services/samples.js";
 
 declare module "@fastify/jwt" {
   interface FastifyJWT {
@@ -109,10 +114,18 @@ export async function buildApp(ctx: AppContext, opts: BuildOptions = {}) {
     });
     await authRoutes(priv, ctx);
     await leadRoutes(priv, ctx);
+    await playbookRoutes(priv, ctx);
     await automationRoutes(priv, ctx);
     await dashboardRoutes(priv, ctx);
     await settingsRoutes(priv, ctx);
+    await prospectingRoutes(priv, ctx);
+    await sampleRoutes(priv, ctx);
   });
+
+  // Prospecções que estavam rodando quando o servidor parou não voltam sozinhas
+  await recoverInterruptedSearches(ctx);
+  // ...nem as amostras que o Claude estava criando
+  await recoverInterruptedSamples(ctx);
 
   // Painel web (build do React)
   if (opts.webDist && existsSync(join(opts.webDist, "index.html"))) {

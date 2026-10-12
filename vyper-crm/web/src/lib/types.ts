@@ -16,6 +16,19 @@ export interface Stage {
   kind: "open" | "won" | "lost";
 }
 
+export interface Playbook {
+  id: number;
+  name: string;
+  goal: string;
+  offer: string;
+  instructions: string;
+  handoffRules: string;
+  firstMessage: string;
+  leadCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Lead {
   id: number;
   name: string | null;
@@ -28,6 +41,7 @@ export interface Lead {
   source: string;
   stageId: number | null;
   ownerId: number | null;
+  playbookId: number | null;
   value: number | null;
   score: number;
   temperature: Temperature;
@@ -142,7 +156,19 @@ export interface Settings {
     optOutKeywords: string[];
     optOutReply: string;
   };
+  notify: {
+    handoffEnabled: boolean;
+    handoffPhone: string;
+  };
   n8n: { webhookUrl: string };
+  samples: {
+    /** Gera a amostra sozinho quando o lead esquenta (o envio é sempre seu) */
+    autoGenerate: boolean;
+    onHot: boolean;
+    onHandoff: boolean;
+    defaultKind: SampleKind;
+    instructions: string;
+  };
 }
 
 export interface SettingsResponse {
@@ -150,6 +176,14 @@ export interface SettingsResponse {
   system: {
     aiEnabled: boolean;
     aiModel: string;
+    /** IA principal em uso */
+    aiProvider: "claude-code" | "anthropic" | "openrouter" | "none";
+    /** A IA consegue pesquisar na web (necessário para a prospecção) */
+    aiResearch: boolean;
+    /** Claude Code (assinatura): só prospecção e amostras */
+    claudeCode: { enabled: boolean; model: string };
+    /** Onde os sites demo são publicados (null = sem NETLIFY_AUTH_TOKEN) */
+    publisher: "netlify" | null;
     whatsappProvider: "simulator" | "evolution" | "meta";
     n8nWebhookFromEnv: boolean;
     integrationApiEnabled: boolean;
@@ -177,6 +211,94 @@ export interface Dashboard {
   waitingReply: Lead[];
   aiEnabled: boolean;
   whatsappProvider: string;
+}
+
+export interface ProspectCriteria {
+  niche: string;
+  location: string;
+  size: string;
+  offer: string;
+  quantity: number;
+  extra: string;
+}
+
+export interface ProspectResult {
+  company: string;
+  contactName: string;
+  /** Apenas dígitos, com DDI; vazio quando o número da fonte não é válido */
+  phone: string;
+  /** Telefone como apareceu na fonte */
+  rawPhone: string;
+  isMobile: boolean;
+  email: string;
+  website: string;
+  instagram: string;
+  address: string;
+  city: string;
+  size: string;
+  fitReason: string;
+  /** Sugestão de primeira mensagem */
+  approach: string;
+  score: number;
+  sources: string[];
+  /** Já existia um lead com este telefone */
+  duplicateLeadId: number | null;
+  /** Lead criado a partir deste resultado */
+  leadId: number | null;
+  /** Conferido no WhatsApp: "yes" tem, "no" não tem, null (ou ausente, em pesquisas antigas) = não verificado */
+  whatsapp?: "yes" | "no" | null;
+}
+
+export type ProspectStatus = "running" | "done" | "failed" | "canceled";
+
+export interface ProspectSearchSummary {
+  id: number;
+  status: ProspectStatus;
+  criteria: ProspectCriteria;
+  /** Andamento (rodando) ou observações da IA (concluída) */
+  progress: string | null;
+  error: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  finishedAt: string | null;
+  resultCount: number;
+}
+
+export interface ProspectSearch extends Omit<ProspectSearchSummary, "resultCount"> {
+  results: ProspectResult[];
+}
+
+export type SampleKind = "site" | "image";
+export type SampleStatus = "generating" | "ready" | "failed" | "sent" | "discarded";
+
+/** Amostra feita pelo Claude para um lead (site demo ou arte), sem o conteúdo pesado */
+export interface SampleSummary {
+  id: number;
+  leadId: number;
+  kind: SampleKind;
+  status: SampleStatus;
+  trigger: "hot" | "handoff" | "manual";
+  instruction: string | null;
+  title: string | null;
+  /** Mensagem sugerida para acompanhar a amostra */
+  caption: string | null;
+  /** Observações do Claude para você */
+  notes: string | null;
+  slug: string | null;
+  publicUrl: string | null;
+  error: string | null;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  sentAt: string | null;
+  hasPreview: boolean;
+}
+
+/** Amostra completa: HTML/SVG em content; a arte em PNG como data URL */
+export interface SampleDetail extends Omit<SampleSummary, "hasPreview"> {
+  content: string | null;
+  imagePng: string | null;
 }
 
 export interface CrmEvent {

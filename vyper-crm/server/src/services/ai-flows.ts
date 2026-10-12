@@ -1,7 +1,8 @@
 import type { z } from "zod";
 import { and, asc, desc, eq, gte } from "drizzle-orm";
 import type { AppContext } from "../context.js";
-import { copilotInsights, leads, messages, type Lead, type Message } from "../db/schema.js";
+import type { Db } from "../db/client.js";
+import { copilotInsights, leads, messages, playbooks, type Lead, type Message, type Playbook } from "../db/schema.js";
 import { AiRateLimitError } from "../ai/errors.js";
 import * as P from "../ai/prompts.js";
 import {
@@ -16,13 +17,20 @@ import {
   type ExtractOutput,
   type FollowupOutput,
 } from "../ai/schemas.js";
-import { asPhoneInput, normalizePhone } from "../lib/phone.js";
+import { asPhoneInput, formatPhone, normalizePhone } from "../lib/phone.js";
 import { getSettings, type AppSettings } from "../settings.js";
 import { addActivity, getLead, HttpError, listStages, stageOf, updateLead } from "./leads.js";
 import { getConversation, sendToLead } from "./messaging.js";
+import { maybeAutoSample } from "./samples.js";
+
+export async function findPlaybook(db: Db, id: number | null | undefined): Promise<Playbook | null> {
+  if (!id) return null;
+  const [row] = await db.select().from(playbooks).where(eq(playbooks.id, id));
+  return row ?? null;
+}
 
 function ensureAi(ctx: AppContext) {
-  if (!ctx.ai.enabled) throw new HttpError(503, "IA desativada: configure ANTHROPIC_API_KEY ou OPENROUTER_API_KEY no .env e reinicie.");
+  if (!ctx.ai.enabled) throw new HttpError(503, "IA desativada: configure OPENROUTER_API_KEY (AI_PROVIDER=openrouter), ANTHROPIC_API_KEY ou AI_PROVIDER=claude-code (sua assinatura) no .env e reinicie.");
 }
 
 /**
@@ -77,6 +85,7 @@ export async function runAutoReply(
 ): Promise<{ sent: boolean; handoff: boolean }> {
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
+  const playbook = await findPlaybook(ctx.db, lead.playbookId);
   const history = await getConversation(ctx, leadId);
   // Só responde se a última mensagem do lead ainda não tiver resposta
   const target = unansweredInbound(history);
@@ -86,7 +95,7 @@ export async function runAutoReply(
   try {
     output = await ctx.ai.generate({
       task: "reply",
-      system: P.replySystem(settings),
+      system: P.replySystem(settings, playbook),
       prompt: P.replyPrompt(lead, await stageOf(ctx.db, lead), P.buildTranscript(history, ctx.config.APP_TIMEZONE)),
       schema: replySchema,
       effort: "low",
@@ -156,10 +165,43 @@ async function botStillOwesReply(ctx: AppContext, leadId: number, targetId: numb
   return Boolean(unansweredInbound(since)) && current.chatMode === "bot" && !current.optedOut;
 }
 
+async function notifyHandoffOwner(ctx: AppContext, lead: Lead, reason: string): Promise<void> {
+  try {
+    const settings = await getSettings(ctx.db);
+    if (!settings.notify?.handoffEnabled || !settings.notify?.handoffPhone?.trim()) return;
+    const phone = normalizePhone(settings.notify.handoffPhone);
+    if (!phone) return;
+
+    const playbook = await findPlaybook(ctx.db, lead.playbookId);
+    const leadName = lead.name || lead.waName || "Lead";
+    const phoneFormatted = formatPhone(lead.phone);
+    const playbookName = playbook?.name || "—";
+    const appUrl = (ctx.config.PUBLIC_URL || "").trim().replace(/\/$/, "");
+    const link = appUrl ? `${appUrl}/inbox?lead=${lead.id}` : "";
+
+    const lines = [
+      "🔔 Lead precisa de você",
+      `${leadName} (${phoneFormatted})`,
+      `Roteiro: ${playbookName}`,
+      `Motivo: ${reason || "sem motivo"}`,
+    ];
+    if (link) lines.push(link);
+
+    await ctx.wa.sendText(phone, lines.join("\n"));
+  } catch (err) {
+    ctx.log.warn({ err: String(err), leadId: lead.id }, "falha ao enviar aviso de handoff para o dono");
+  }
+}
+
 async function handoffToHuman(ctx: AppContext, leadId: number, reason: string): Promise<void> {
   await updateLead(ctx, leadId, { chatMode: "human" }, { reason: "handoff" });
   await addActivity(ctx.db, leadId, "handoff", `IA passou a conversa para um humano: ${reason || "sem motivo"}`);
-  ctx.events.emit("lead.handoff", { lead: await getLead(ctx.db, leadId), reason });
+  const current = await getLead(ctx.db, leadId);
+  ctx.events.emit("lead.handoff", { lead: current, reason });
+  // Lead passado para você: o Claude já prepara uma amostra (site/arte) para você revisar e enviar
+  await maybeAutoSample(ctx, leadId, "handoff");
+  // Aviso de handoff no WhatsApp do dono
+  await notifyHandoffOwner(ctx, current, reason);
 }
 
 /** Atualiza a ficha do lead (nome, interesse, nota, temperatura...) a partir da conversa. */
@@ -167,6 +209,7 @@ export async function runQualification(ctx: AppContext, leadId: number): Promise
   ensureAi(ctx);
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
+  const playbook = await findPlaybook(ctx.db, lead.playbookId);
   const stages = await listStages(ctx.db);
   const history = await getConversation(ctx, leadId, 60);
   const transcript = P.buildTranscript(history, ctx.config.APP_TIMEZONE);
@@ -174,7 +217,7 @@ export async function runQualification(ctx: AppContext, leadId: number): Promise
 
   const out = await ctx.ai.generate({
     task: "qualify",
-    system: P.qualifySystem(settings, stages),
+    system: P.qualifySystem(settings, stages, playbook),
     prompt: P.qualifyPrompt(lead, stages.find((s) => s.id === lead.stageId), transcript + extra),
     schema: qualifySchema,
     effort: "low",
@@ -202,6 +245,8 @@ export async function runQualification(ctx: AppContext, leadId: number): Promise
   if (out.temperature === "quente" && lead.temperature !== "quente") {
     await addActivity(ctx.db, leadId, "hot", `🔥 IA marcou o lead como quente (nota ${score})`, { summary: out.summary });
     ctx.events.emit("lead.hot", { lead: await getLead(ctx.db, leadId), summary: out.summary, score });
+    // Lead quente: o Claude já prepara uma amostra (site/arte) para você revisar e enviar
+    await maybeAutoSample(ctx, leadId, "hot");
   }
 
   // Avança no funil quando a IA tiver certeza — só para frente e nunca para Ganho/Perdido
@@ -234,10 +279,11 @@ export async function runCopilot(ctx: AppContext, leadId: number): Promise<Copil
   ensureAi(ctx);
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
+  const playbook = await findPlaybook(ctx.db, lead.playbookId);
   const history = await getConversation(ctx, leadId, 60);
   const out = await ctx.ai.generate({
     task: "copilot",
-    system: P.copilotSystem(settings),
+    system: P.copilotSystem(settings, playbook),
     prompt: P.copilotPrompt(lead, await stageOf(ctx.db, lead), P.buildTranscript(history, ctx.config.APP_TIMEZONE)),
     schema: copilotSchema,
     effort: "medium",
@@ -271,10 +317,11 @@ export async function askCopilot(
   ensureAi(ctx);
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
+  const playbook = await findPlaybook(ctx.db, lead.playbookId);
   const history = await getConversation(ctx, leadId, 60);
   return ctx.ai.generate({
     task: "copilot_ask",
-    system: P.copilotSystem(settings),
+    system: P.copilotSystem(settings, playbook),
     prompt: P.copilotAskPrompt(
       lead,
       await stageOf(ctx.db, lead),
@@ -309,10 +356,11 @@ export async function composeFollowup(ctx: AppContext, leadId: number, instructi
   ensureAi(ctx);
   const settings = await getSettings(ctx.db);
   const lead = await getLead(ctx.db, leadId);
+  const playbook = await findPlaybook(ctx.db, lead.playbookId);
   const history = await getConversation(ctx, leadId, 40);
   return ctx.ai.generate({
     task: "followup",
-    system: P.followupSystem(settings),
+    system: P.followupSystem(settings, playbook),
     prompt: P.followupPrompt(lead, await stageOf(ctx.db, lead), P.buildTranscript(history, ctx.config.APP_TIMEZONE), instruction),
     schema: followupSchema,
     effort: "low",

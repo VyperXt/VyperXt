@@ -1,0 +1,1 @@
+ALTER TABLE "scheduled_messages" ADD COLUMN "author" text DEFAULT 'agent' NOT NULL;

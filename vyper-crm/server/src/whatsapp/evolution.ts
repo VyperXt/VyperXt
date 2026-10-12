@@ -1,12 +1,15 @@
-import { normalizePhone } from "../lib/phone.js";
+import { normalizePhone, phoneVariants } from "../lib/phone.js";
 import {
   mediaPlaceholder,
   type ConnectResult,
   type ConnectionStatus,
   type IncomingMessage,
+  type NumberCheck,
+  type OutgoingImage,
   type ParsedWebhook,
   type StatusUpdate,
   type WhatsAppProvider,
+  WhatsAppNumberNotFoundError,
 } from "./types.js";
 
 export interface EvolutionOptions {
@@ -31,12 +34,12 @@ export class EvolutionProvider implements WhatsAppProvider {
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async call<T>(method: string, path: string, body?: unknown, timeoutMs = 30_000): Promise<T> {
     const res = await this.fetchImpl(`${this.opts.baseUrl.replace(/\/$/, "")}${path}`, {
       method,
       headers: { "content-type": "application/json", apikey: this.opts.apiKey },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
     let json: unknown = null;
@@ -47,18 +50,76 @@ export class EvolutionProvider implements WhatsAppProvider {
     }
     if (!res.ok) {
       const err = new Error(`Evolution API ${method} ${path} → ${res.status}: ${text.slice(0, 300)}`);
-      (err as Error & { status?: number }).status = res.status;
+      Object.assign(err, { status: res.status, body: json });
       throw err;
     }
     return json as T;
   }
 
+  /**
+   * Envio recusado porque o número não tem WhatsApp: a Evolution responde 400 com
+   * `{ response: { message: [{ jid, exists: false, number }] } }` (ela já tenta com e sem o 9).
+   * Nesse caso troca o erro cru por WhatsAppNumberNotFoundError; os demais erros passam como estão.
+   */
+  private async send<T>(phone: string, path: string, body: unknown, timeoutMs?: number): Promise<T> {
+    try {
+      return await this.call<T>("POST", path, body, timeoutMs);
+    } catch (err) {
+      const { status, body: resBody } = err as { status?: number; body?: unknown };
+      if (status === 400 && hasMissingNumber(resBody)) {
+        throw new WhatsAppNumberNotFoundError(phone, (err as Error).message);
+      }
+      throw err;
+    }
+  }
+
   async sendText(phone: string, text: string): Promise<{ externalId?: string }> {
-    const res = await this.call<{ key?: { id?: string } }>("POST", `/message/sendText/${this.opts.instance}`, {
+    const res = await this.send<{ key?: { id?: string } }>(phone, `/message/sendText/${this.opts.instance}`, {
       number: phone,
       text,
     });
     return { externalId: res?.key?.id };
+  }
+
+  /** POST /message/sendMedia com a imagem em base64 (sem URL pública). */
+  async sendImage(phone: string, image: OutgoingImage): Promise<{ externalId?: string }> {
+    const ext = image.mimeType === "image/png" ? "png" : "jpg";
+    const res = await this.send<{ key?: { id?: string } }>(
+      phone,
+      `/message/sendMedia/${this.opts.instance}`,
+      {
+        number: phone,
+        mediatype: "image",
+        mimetype: image.mimeType,
+        caption: image.caption ?? "",
+        media: image.data.toString("base64"),
+        fileName: image.fileName || `imagem.${ext}`,
+      },
+      120_000,
+    );
+    return { externalId: res?.key?.id };
+  }
+
+  /**
+   * POST /chat/whatsappNumbers → [{ exists, jid, number, name?, lid? }]. O jid é o número que o WhatsApp
+   * usa de fato (no Brasil pode vir sem o 9). Resposta fora do esperado → erro (= "não deu para conferir").
+   */
+  async checkNumber(phone: string): Promise<NumberCheck> {
+    const res = await this.call<unknown>("POST", `/chat/whatsappNumbers/${this.opts.instance}`, { numbers: [phone] });
+    // v2 devolve a lista direto; aceita também { response: [...] } ou um objeto só
+    const list: unknown = Array.isArray(res) ? res : (res as AnyRecord | null)?.response;
+    const items: unknown[] = Array.isArray(list) ? list : res && typeof res === "object" ? [res] : [];
+    const variants = new Set(phoneVariants(phone));
+    const entries = items.filter((i): i is AnyRecord => typeof i === "object" && i !== null && "exists" in i);
+    // Pedimos um número só, mas confere pelo campo "number" quando ele vem (ignora formatação)
+    const entry =
+      entries.find((e) => variants.has(String(e.number ?? "").replace(/\D/g, ""))) ??
+      (entries.length === 1 ? entries[0] : undefined);
+    if (!entry) {
+      throw new Error(`Evolution API: resposta inesperada ao conferir o número (${JSON.stringify(res)?.slice(0, 200)})`);
+    }
+    const exists = entry.exists === true || entry.exists === "true";
+    return { exists, jid: exists && typeof entry.jid === "string" && entry.jid ? entry.jid : null };
   }
 
   async status(): Promise<ConnectionStatus> {
@@ -137,6 +198,16 @@ export class EvolutionProvider implements WhatsAppProvider {
 }
 
 type AnyRecord = Record<string, any>;
+
+/** Corpo de erro da Evolution com alguma entrada { exists: false } em response.message (ou message). */
+function hasMissingNumber(body: unknown): boolean {
+  const b = body as AnyRecord | null;
+  const list: unknown = b?.response?.message ?? b?.message;
+  const items: unknown[] = Array.isArray(list) ? list : list && typeof list === "object" ? [list] : [];
+  return items.some(
+    (i) => typeof i === "object" && i !== null && "exists" in i && ((i as AnyRecord).exists === false || (i as AnyRecord).exists === "false"),
+  );
+}
 
 function extractContent(message: AnyRecord | undefined, messageType?: string): { body: string; mediaType: string } {
   if (!message) return { body: "", mediaType: "text" };

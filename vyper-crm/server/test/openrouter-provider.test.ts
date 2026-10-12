@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { AiError, AiRateLimitError, AiRefusalError } from "../src/ai/errors.js";
 import { extractJson, OpenRouterProvider, toStrictJsonSchema } from "../src/ai/openrouter.js";
-import { ClaudeProvider, createAiProvider, DisabledAi, FallbackAi, type AiConfig, type AiProvider } from "../src/ai/provider.js";
+import { ClaudeCodeProvider } from "../src/ai/claude-code.js";
+import {
+  aiProviderKind,
+  ClaudeProvider,
+  createAiProvider,
+  DisabledAi,
+  FallbackAi,
+  type AiConfig,
+  type AiProvider,
+  type ResearchRequest,
+} from "../src/ai/provider.js";
 import { copilotSchema, qualifySchema, replySchema } from "../src/ai/schemas.js";
 import { loadConfig } from "../src/config.js";
 
@@ -272,6 +282,35 @@ describe("escolha da IA", () => {
     expect(loadConfig({ OPENROUTER_MODEL: "" }).OPENROUTER_MODEL).toBe("openrouter/free");
     expect(loadConfig({ OPENROUTER_MODEL: " google/gemma-4-31b-it:free " }).OPENROUTER_MODEL).toBe("google/gemma-4-31b-it:free");
     expect(() => loadConfig({ AI_PROVIDER: "gpt" })).toThrow(/AI_PROVIDER/);
+    for (const alias of ["claude-code", " Claude-Code ", "claudecode", "assinatura"]) {
+      expect(loadConfig({ AI_PROVIDER: alias }).AI_PROVIDER).toBe("claude-code");
+    }
+    const cc = loadConfig({});
+    expect([cc.CLAUDE_CODE_MODEL, cc.CLAUDE_CODE_RESEARCH_MODEL, cc.CLAUDE_CODE_PATH, cc.CLAUDE_CODE_OAUTH_TOKEN]).toEqual(["sonnet", "", "", ""]);
+    expect([cc.CLAUDE_CODE_TIMEOUT_MS, cc.CLAUDE_CODE_MAX_CONCURRENCY]).toEqual([180_000, 2]);
+    expect(loadConfig({ CLAUDE_CODE_MODEL: " ", CLAUDE_CODE_TIMEOUT_MS: "60000" })).toMatchObject({ CLAUDE_CODE_MODEL: "sonnet", CLAUDE_CODE_TIMEOUT_MS: 60_000 });
+  });
+
+  it("claude-code: só por escolha explícita; reserva é o Claude (API) e depois o OpenRouter", () => {
+    const both = { ...base, ANTHROPIC_API_KEY: "sk-ant", OPENROUTER_API_KEY: "sk-or" };
+    // auto nunca escolhe o Claude Code
+    expect(aiProviderKind(createAiProvider(both))).toBe("anthropic");
+    const alone = createAiProvider({ ...base, AI_PROVIDER: "claude-code", CLAUDE_CODE_MODEL: "haiku" });
+    expect(alone).toBeInstanceOf(ClaudeCodeProvider);
+    expect(alone.model).toBe("claude-code:haiku (assinatura)");
+    expect(alone.research).toBeTypeOf("function");
+    expect(aiProviderKind(alone)).toBe("claude-code");
+    const withApi = createAiProvider({ ...both, AI_PROVIDER: "claude-code" });
+    expect(withApi.model).toBe("claude-code:sonnet (assinatura) (reserva: claude-opus-5-5)");
+    expect(aiProviderKind(withApi)).toBe("claude-code");
+    const withOpenRouter = createAiProvider({ ...base, AI_PROVIDER: "claude-code", OPENROUTER_API_KEY: "sk-or" });
+    expect(withOpenRouter.model).toBe("claude-code:sonnet (assinatura) (reserva: openrouter/free)");
+    expect(withOpenRouter.research).toBeTypeOf("function");
+    expect(aiProviderKind(createAiProvider({ ...base, OPENROUTER_API_KEY: "sk-or" }))).toBe("openrouter");
+    expect(aiProviderKind(createAiProvider(base))).toBe("none");
+    // Só o OpenRouter não pesquisa na web
+    expect(createAiProvider({ ...base, OPENROUTER_API_KEY: "sk-or" }).research).toBeUndefined();
+    expect(createAiProvider(base).research).toBeUndefined();
   });
 
   it("reserva assume quando a principal falha, mas não depois de uma recusa", async () => {
@@ -289,5 +328,43 @@ describe("escolha da IA", () => {
     expect(err).toBeInstanceOf(AiRateLimitError);
     expect(err.daily).toBe(true);
     expect(err.message).toContain("Claude sem crédito");
+  });
+
+  it("pesquisa na web: principal primeiro, reserva só em falha que não é recusa nem cancelamento", async () => {
+    const researchReq = { ...req, task: "prospect" as const } as ResearchRequest<typeof replySchema>;
+    const answer = { reply: "pesquisado", handoff: false, handoffReason: "" };
+    const plain: AiProvider = { enabled: true, model: "sem-web", generate: async () => answer as any };
+    const researcher = (r: () => Promise<unknown>): AiProvider => ({ ...plain, model: "web", research: r as any });
+    const failing = (err: Error) => researcher(() => Promise.reject(err));
+
+    // Nenhuma das duas pesquisa: o FallbackAi também não
+    expect(new FallbackAi(plain, plain).research).toBeUndefined();
+    // Só a reserva pesquisa: usa ela direto
+    expect(await new FallbackAi(plain, researcher(async () => answer)).research!(researchReq)).toEqual(answer);
+
+    const warned: unknown[] = [];
+    const viaBackup = new FallbackAi(failing(new AiError("fora do ar")), researcher(async () => answer), (e) => warned.push(e));
+    expect(await viaBackup.research!(researchReq)).toEqual(answer);
+    expect(warned).toHaveLength(1);
+    // Principal falhou e a reserva não pesquisa: o erro da principal
+    await expect(new FallbackAi(failing(new AiError("fora do ar")), plain).research!(researchReq)).rejects.toThrow("fora do ar");
+    // Recusa e cancelamento não vão para a reserva
+    let backupCalls = 0;
+    const backup = researcher(async () => {
+      backupCalls++;
+      return answer;
+    });
+    await expect(new FallbackAi(failing(new AiRefusalError("não")), backup).research!(researchReq)).rejects.toThrow(AiRefusalError);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      new FallbackAi(failing(new AiError("Pesquisa cancelada.")), backup).research!({ ...researchReq, signal: controller.signal }),
+    ).rejects.toThrow("Pesquisa cancelada.");
+    expect(backupCalls).toBe(0);
+    // Principal sem cota e reserva falhou: vale o limite
+    const both = new FallbackAi(failing(new AiRateLimitError("cota", { daily: true })), failing(new Error("sem crédito")));
+    const err = await both.research!(researchReq).catch((e) => e);
+    expect(err).toBeInstanceOf(AiRateLimitError);
+    expect(err.message).toContain("sem crédito");
   });
 });

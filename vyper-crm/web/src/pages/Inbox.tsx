@@ -12,16 +12,19 @@ import {
   MessageSquarePlus,
   Search,
   Send,
+  TriangleAlert,
   UserRound,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { CopilotPanel } from "../components/CopilotPanel";
-import { Avatar, Badge, Button, Empty, Modal, Spinner, TemperatureBadge } from "../components/ui";
+import { AutoTextarea } from "../components/AutoTextarea";
+import { NewSampleButton, SampleStrip } from "../components/SamplePanel";
+import { Avatar, Badge, Button, Empty, Field, Modal, Spinner, TemperatureBadge } from "../components/ui";
 import { api } from "../lib/api";
 import { useErrorToast, useSettings, useStages, useToast } from "../lib/app-state";
-import { formatPhone, formatTime, leadName, timeAgo } from "../lib/format";
+import { formatPhone, formatTime, leadName, NOT_ON_WHATSAPP_ERROR, timeAgo } from "../lib/format";
 import type { Conversation, Lead, LeadDetail, Message } from "../lib/types";
 
 const FILTERS = [
@@ -31,6 +34,11 @@ const FILTERS = [
   { id: "bot", label: "Com a IA" },
   { id: "human", label: "Comigo" },
 ] as const;
+
+/** Estado da navegação para /conversas/:id: focar a caixa de mensagem ao abrir */
+interface ComposerState {
+  focusComposer?: boolean;
+}
 
 const AUTHOR_LABEL: Record<Message["author"], string> = {
   lead: "",
@@ -46,6 +54,7 @@ export function InboxPage() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("all");
   const [search, setSearch] = useState("");
   const [simOpen, setSimOpen] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
   const navigate = useNavigate();
   const settings = useSettings();
   const isSimulator = settings.data?.system.whatsappProvider === "simulator";
@@ -56,18 +65,42 @@ export function InboxPage() {
       api<Conversation[]>(`/conversations?filter=${filter}&limit=200${search ? `&search=${encodeURIComponent(search)}` : ""}`),
   });
 
+  // Conversa aberta que não está na lista (ex.: nova conversa, ainda sem mensagens): fica fixada no topo,
+  // como no WhatsApp Web. Usa os mesmos dados que o ChatArea já carrega.
+  const missingSelected = Boolean(selectedId && conversations.data && !conversations.data.some((c) => c.lead.id === selectedId));
+  const selectedDetail = useQuery({
+    queryKey: ["lead", selectedId],
+    queryFn: () => api<LeadDetail>(`/leads/${selectedId}`),
+    enabled: missingSelected,
+  });
+  const selectedLead = selectedDetail.data?.lead;
+  // Com mensagens, só fica de fora por causa da busca/filtro (aí respeita a busca) ou do limite da lista
+  const pinned =
+    missingSelected && selectedLead?.id === selectedId && (!selectedLead.lastMessageAt || (filter === "all" && !search))
+      ? selectedLead
+      : null;
+
   return (
     <div className="flex h-full">
       {/* Lista de conversas */}
       <div className={`flex w-full flex-col border-r border-slate-200 bg-white md:w-80 md:shrink-0 ${selectedId ? "hidden md:flex" : "flex"}`}>
         <div className="space-y-2 border-b border-slate-200 p-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <h1 className="text-lg font-semibold">Conversas</h1>
-            {isSimulator && (
-              <Button variant="ghost" size="sm" icon={<FlaskConical className="size-4" />} onClick={() => setSimOpen(true)}>
-                Simular
-              </Button>
-            )}
+            <div className="flex items-center gap-1">
+              {isSimulator && (
+                <Button variant="ghost" size="sm" icon={<FlaskConical className="size-4" />} onClick={() => setSimOpen(true)}>
+                  Simular
+                </Button>
+              )}
+              <Button
+                size="sm"
+                icon={<MessageSquarePlus className="size-4" />}
+                onClick={() => setNewOpen(true)}
+                title="Nova conversa"
+                aria-label="Nova conversa"
+              />
+            </div>
           </div>
           <div className="relative">
             <Search className="absolute top-2.5 left-2.5 size-4 text-slate-400" />
@@ -89,50 +122,32 @@ export function InboxPage() {
         </div>
         <div className="scroll-thin flex-1 overflow-y-auto">
           {conversations.isLoading && <Spinner className="m-6" />}
-          {conversations.data?.length === 0 && (
+          {pinned && (
+            <ConversationRow
+              lead={pinned}
+              lastMessage={null}
+              selected
+              isNew={!pinned.lastMessageAt}
+              onOpen={() => navigate(`/conversas/${pinned.id}`)}
+            />
+          )}
+          {conversations.data?.length === 0 && !pinned && (
             <Empty icon={<MessageSquarePlus className="size-10" />} title="Nenhuma conversa">
-              Quando alguém mandar mensagem no seu WhatsApp, aparece aqui.{isSimulator && <> Use <b>Simular</b> para testar.</>}
+              Quando alguém mandar mensagem no seu WhatsApp, aparece aqui. Para falar com alguém,{" "}
+              <button className="font-medium text-brand-700 hover:underline" onClick={() => setNewOpen(true)}>
+                comece uma nova conversa
+              </button>
+              .{isSimulator && <> Use <b>Simular</b> para testar.</>}
             </Empty>
           )}
           {conversations.data?.map(({ lead, lastMessage }) => (
-            <button
+            <ConversationRow
               key={lead.id}
-              onClick={() => navigate(`/conversas/${lead.id}`)}
-              className={`flex w-full items-start gap-3 border-b border-slate-100 px-3 py-3 text-left transition hover:bg-slate-50 ${
-                selectedId === lead.id ? "bg-brand-50" : ""
-              }`}
-            >
-              <Avatar name={leadName(lead)} id={lead.id} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="truncate text-sm font-medium">{leadName(lead)}</p>
-                  <span className="shrink-0 text-[11px] text-slate-400">{timeAgo(lead.lastMessageAt)}</span>
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <p className="truncate text-xs text-slate-500">
-                    {lastMessage?.direction === "out" && <span className="text-slate-400">{lastMessage.author === "bot" ? "IA: " : "Você: "}</span>}
-                    {lastMessage?.body}
-                  </p>
-                  {lead.unreadCount > 0 && (
-                    <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-brand-600 px-1 text-[10px] font-bold text-white">
-                      {lead.unreadCount}
-                    </span>
-                  )}
-                </div>
-                <div className="mt-1 flex items-center gap-1">
-                  {lead.chatMode === "bot" ? (
-                    <Badge className="bg-violet-50 text-violet-700">
-                      <Bot className="size-3" /> IA
-                    </Badge>
-                  ) : (
-                    <Badge className="bg-slate-100 text-slate-600">
-                      <UserRound className="size-3" /> Você
-                    </Badge>
-                  )}
-                  <TemperatureBadge value={lead.temperature} />
-                </div>
-              </div>
-            </button>
+              lead={lead}
+              lastMessage={lastMessage}
+              selected={selectedId === lead.id}
+              onOpen={() => navigate(`/conversas/${lead.id}`)}
+            />
           ))}
         </div>
       </div>
@@ -143,11 +158,82 @@ export function InboxPage() {
         <div className="hidden flex-1 items-center justify-center bg-chat md:flex">
           <Empty icon={<Compass className="size-12" />} title="Selecione uma conversa">
             O copiloto acompanha a conversa e sugere caminhos. Você decide o que enviar.
+            <div className="mt-4">
+              <Button variant="secondary" icon={<MessageSquarePlus className="size-4" />} onClick={() => setNewOpen(true)}>
+                Nova conversa
+              </Button>
+            </div>
           </Empty>
         </div>
       )}
       <SimulateModal open={simOpen} onClose={() => setSimOpen(false)} />
+      {/* key nova a cada abertura: o formulário sempre começa limpo */}
+      <NewConversationModal key={newOpen ? "aberto" : "fechado"} open={newOpen} onClose={() => setNewOpen(false)} />
     </div>
+  );
+}
+
+function ConversationRow({
+  lead,
+  lastMessage,
+  selected,
+  isNew,
+  onOpen,
+}: {
+  lead: Lead;
+  lastMessage: Conversation["lastMessage"];
+  selected: boolean;
+  isNew?: boolean;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      onClick={onOpen}
+      className={`flex w-full items-start gap-3 border-b border-slate-100 px-3 py-3 text-left transition hover:bg-slate-50 ${
+        selected ? "bg-brand-50" : ""
+      }`}
+    >
+      <Avatar name={leadName(lead)} id={lead.id} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <p className="truncate text-sm font-medium">{leadName(lead)}</p>
+          {isNew ? (
+            <Badge className="shrink-0 bg-brand-100 text-brand-700">nova</Badge>
+          ) : (
+            <span className="shrink-0 text-[11px] text-slate-400">{timeAgo(lead.lastMessageAt)}</span>
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <p className="truncate text-xs text-slate-500">
+            {isNew && !lastMessage ? (
+              formatPhone(lead.phone)
+            ) : (
+              <>
+                {lastMessage?.direction === "out" && <span className="text-slate-400">{lastMessage.author === "bot" ? "IA: " : "Você: "}</span>}
+                {lastMessage?.body}
+              </>
+            )}
+          </p>
+          {lead.unreadCount > 0 && (
+            <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-brand-600 px-1 text-[10px] font-bold text-white">
+              {lead.unreadCount}
+            </span>
+          )}
+        </div>
+        <div className="mt-1 flex items-center gap-1">
+          {lead.chatMode === "bot" ? (
+            <Badge className="bg-violet-50 text-violet-700">
+              <Bot className="size-3" /> IA
+            </Badge>
+          ) : (
+            <Badge className="bg-slate-100 text-slate-600">
+              <UserRound className="size-3" /> Você
+            </Badge>
+          )}
+          <TemperatureBadge value={lead.temperature} />
+        </div>
+      </div>
+    </button>
   );
 }
 
@@ -162,6 +248,31 @@ function ChatArea({ leadId }: { leadId: number }) {
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Foco na caixa de mensagem assim que ela aparecer (nova conversa ou texto vindo pela URL).
+  // Depende de location.key: abrir de novo a mesma conversa (já montada) também foca.
+  const [focusPending, setFocusPending] = useState(false);
+  const focusRequested = Boolean((location.state as ComposerState | null)?.focusComposer);
+  useEffect(() => {
+    if (focusRequested) setFocusPending(true);
+  }, [focusRequested, location.key]);
+
+  // /conversas/:id?mensagem=... preenche o rascunho uma vez (ex.: abordagem sugerida na Prospecção)
+  const prefill = searchParams.get("mensagem");
+  useEffect(() => {
+    if (prefill === null) return;
+    setDraft(prefill);
+    setFocusPending(true);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("mensagem");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [prefill, setSearchParams]);
 
   const detail = useQuery({ queryKey: ["lead", leadId], queryFn: () => api<LeadDetail>(`/leads/${leadId}`) });
   const messages = useQuery({ queryKey: ["messages", leadId], queryFn: () => api<Message[]>(`/leads/${leadId}/messages`) });
@@ -180,11 +291,23 @@ function ChatArea({ leadId }: { leadId: number }) {
     }
   }, [lead?.unreadCount, leadId, qc]);
 
+  useEffect(() => {
+    if (!focusPending || !lead) return;
+    const el = textRef.current;
+    if (el && !el.disabled) {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+    setFocusPending(false);
+  }, [focusPending, lead]);
+
   const send = useMutation({
     mutationFn: (body: string) => api<Message>(`/leads/${leadId}/messages`, { body: { body } }),
     onSuccess: () => {
       setDraft("");
       qc.invalidateQueries({ queryKey: ["messages", leadId] });
+      // Primeira mensagem de uma conversa nova: ela entra na lista (sem depender do tempo real)
+      qc.invalidateQueries({ queryKey: ["conversations"] });
     },
     onError: (err) => {
       onError(err);
@@ -220,6 +343,10 @@ function ChatArea({ leadId }: { leadId: number }) {
     setCopilotOpen(false);
     setTimeout(() => textRef.current?.focus(), 0);
   };
+
+  // Último envio recusado porque o número não tem WhatsApp: aviso discreto acima da caixa de mensagem
+  const lastOut = messages.data?.findLast((m) => m.direction === "out");
+  const notOnWhatsApp = lastOut?.status === "failed" && lastOut.error === NOT_ON_WHATSAPP_ERROR;
 
   const grouped = useMemo(() => {
     const out: Array<{ day: string; items: Message[] }> = [];
@@ -287,6 +414,8 @@ function ChatArea({ leadId }: { leadId: number }) {
             Este lead pediu para não receber mensagens automáticas. Só você pode falar com ele.
           </div>
         )}
+        {/* Amostra do Claude (site demo / arte) esperando sua revisão */}
+        <SampleStrip lead={lead} />
 
         {/* Mensagens */}
         <div className="scroll-thin flex-1 space-y-1 overflow-y-auto px-3 py-4 md:px-8">
@@ -306,6 +435,17 @@ function ChatArea({ leadId }: { leadId: number }) {
 
         {/* Caixa de mensagem */}
         <div className="border-t border-slate-200 bg-slate-100 p-2 md:p-3">
+          {notOnWhatsApp && (
+            <p className="mb-1.5 flex items-start gap-1.5 px-1 text-xs text-amber-800" role="status">
+              <TriangleAlert className="mt-px size-3.5 shrink-0" />
+              <span>
+                Este número não tem WhatsApp.{" "}
+                <Link to={`/leads/${lead.id}`} className="font-medium underline hover:text-amber-950">
+                  Confira o número na ficha do lead.
+                </Link>
+              </span>
+            </p>
+          )}
           {lead.chatMode === "bot" && (
             <p className="mb-1.5 px-1 text-xs text-violet-700">
               A IA está respondendo este lead. Se você enviar uma mensagem, a IA pausa e você assume (com o copiloto).
@@ -318,10 +458,10 @@ function ChatArea({ leadId }: { leadId: number }) {
               sendDraft();
             }}
           >
-            <textarea
+            <AutoTextarea
               ref={textRef}
-              className="input max-h-40 min-h-[42px] resize-none"
-              rows={Math.min(6, Math.max(1, draft.split("\n").length))}
+              className="input scroll-thin min-h-[42px] leading-snug"
+              maxHeight={220}
               placeholder={canMessage ? "Escreva sua mensagem..." : "Este lead não tem telefone"}
               value={draft}
               disabled={!canMessage}
@@ -333,6 +473,7 @@ function ChatArea({ leadId }: { leadId: number }) {
                 }
               }}
             />
+            <NewSampleButton lead={lead} />
             <Button
               type="button"
               variant="secondary"
@@ -514,6 +655,87 @@ function SimulateModal({ open, onClose }: { open: boolean; onClose: () => void }
           Simular
         </Button>
       </div>
+    </Modal>
+  );
+}
+
+interface StartConversationResponse {
+  lead: Lead;
+  created: boolean;
+  /** Aviso para mostrar antes de escrever (ex.: API oficial da Meta fora da janela de 24h) */
+  warning: string | null;
+}
+
+/** Nova conversa com qualquer número, como no WhatsApp Web: acha o lead pelo telefone ou cria um. */
+function NewConversationModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [form, setForm] = useState({ phone: "", name: "" });
+  const [error, setError] = useState<string | null>(null);
+  const m = useMutation({
+    mutationFn: () =>
+      api<StartConversationResponse>("/conversations/start", { body: { phone: form.phone, name: form.name.trim() || null } }),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["conversations"] });
+      if (res.created) qc.invalidateQueries({ queryKey: ["leads"] });
+      onClose();
+      navigate(`/conversas/${res.lead.id}`, { state: { focusComposer: true } satisfies ComposerState });
+      if (res.warning) toast({ kind: "info", text: res.warning });
+      else if (!res.created) toast({ kind: "info", text: `${leadName(res.lead)} já está no CRM — abrindo a conversa.` });
+    },
+    // Número inválido, sem WhatsApp etc.: mostra aqui mesmo, para corrigir sem fechar
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    setForm({ ...form, [k]: e.target.value });
+    setError(null);
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Nova conversa">
+      <form
+        className="grid gap-3 sm:grid-cols-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (form.phone.trim() && !m.isPending) m.mutate();
+        }}
+      >
+        <Field label="WhatsApp (com DDD)" hint="Outros países: comece com + e o código do país (ex.: +351 912 345 678).">
+          <input
+            className="input"
+            type="tel"
+            inputMode="tel"
+            autoComplete="off"
+            placeholder="11 99999-8888"
+            value={form.phone}
+            onChange={set("phone")}
+            aria-invalid={Boolean(error)}
+            aria-describedby={error ? "nova-conversa-erro" : undefined}
+            autoFocus
+            required
+          />
+        </Field>
+        <Field label="Nome (opcional)">
+          <input className="input" autoComplete="off" placeholder="Como você chama o contato" value={form.name} onChange={set("name")} />
+        </Field>
+        {error && (
+          <p id="nova-conversa-erro" role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 sm:col-span-2">
+            {error}
+          </p>
+        )}
+        <p className="text-xs text-slate-500 sm:col-span-2">
+          Se o número já for um lead, a conversa dele abre. Nada é enviado até você escrever a primeira mensagem.
+        </p>
+        <div className="flex justify-end gap-2 sm:col-span-2">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" loading={m.isPending} disabled={!form.phone.trim()} icon={<MessageSquarePlus className="size-4" />}>
+            Abrir conversa
+          </Button>
+        </div>
+      </form>
     </Modal>
   );
 }

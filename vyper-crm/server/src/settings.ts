@@ -49,6 +49,21 @@ const sections = {
     // Se vazio, usa a variável N8N_WEBHOOK_URL
     webhookUrl: z.string(),
   }),
+  // Amostras feitas pelo Claude Code (site demo ou arte) quando o lead esquenta
+  samples: z.object({
+    // Gera sozinho quando o lead fica quente / é passado para você (o envio é sempre manual)
+    autoGenerate: z.boolean(),
+    onHot: z.boolean(),
+    onHandoff: z.boolean(),
+    defaultKind: z.enum(["site", "image"]),
+    // Suas orientações para todas as amostras (estilo, o que destacar, o que evitar)
+    instructions: z.string(),
+  }),
+  // Aviso quando a IA passa para você
+  notify: z.object({
+    handoffEnabled: z.boolean(),
+    handoffPhone: z.string(),
+  }),
 };
 
 export const appSettingsSchema = z.object(sections);
@@ -86,6 +101,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     optOutReply: "Tudo bem! Você não vai mais receber mensagens automáticas. Se precisar, é só chamar. 👍",
   },
   n8n: { webhookUrl: "" },
+  samples: { autoGenerate: true, onHot: true, onHandoff: true, defaultKind: "site", instructions: "" },
+  notify: { handoffEnabled: false, handoffPhone: "" },
 };
 
 const SECTION_NAMES = Object.keys(sections) as SectionName[];
@@ -119,6 +136,8 @@ export const settingsPatchSchema = z.object({
   ai: sections.ai.partial().optional(),
   automation: sections.automation.partial().optional(),
   n8n: sections.n8n.partial().optional(),
+  samples: sections.samples.partial().optional(),
+  notify: sections.notify.partial().optional(),
 });
 
 export async function updateSettings(db: Db, patch: z.infer<typeof settingsPatchSchema>): Promise<AppSettings> {
@@ -131,6 +150,34 @@ export async function updateSettings(db: Db, patch: z.infer<typeof settingsPatch
   await db
     .insert(settings)
     .values({ key: SETTINGS_KEY, value })
+    .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } });
+  return value;
+}
+
+export interface QueueState {
+  pausedUntil: string | null;
+  reason: string | null;
+}
+
+const QUEUE_SETTINGS_KEY = "queue";
+
+export async function getQueueState(db: Db): Promise<QueueState> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, QUEUE_SETTINGS_KEY));
+  const val = row?.value as Record<string, unknown> | undefined;
+  return {
+    pausedUntil: typeof val?.pausedUntil === "string" ? val.pausedUntil : null,
+    reason: typeof val?.reason === "string" ? val.reason : null,
+  };
+}
+
+export async function setQueueState(db: Db, state: QueueState): Promise<QueueState> {
+  const value: QueueState = {
+    pausedUntil: state.pausedUntil ?? null,
+    reason: state.reason ?? null,
+  };
+  await db
+    .insert(settings)
+    .values({ key: QUEUE_SETTINGS_KEY, value })
     .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } });
   return value;
 }

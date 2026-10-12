@@ -14,7 +14,10 @@ export type CrmEventType =
   | "message.status"
   | "copilot.updated"
   | "whatsapp.connection"
-  | "whatsapp.qrcode";
+  | "whatsapp.qrcode"
+  | "prospect.updated"
+  | "sample.updated"
+  | "scheduled.updated";
 
 export interface CrmEvent {
   type: CrmEventType;

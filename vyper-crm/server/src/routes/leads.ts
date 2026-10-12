@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, isNotNull, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
@@ -7,12 +7,16 @@ import {
   enrollments,
   leads,
   messages,
+  playbooks,
   scheduledMessages,
   sequences,
   stages,
   users,
+  type Lead,
+  type Playbook,
 } from "../db/schema.js";
 import { currentUserId, HttpError, idParam, parse, requireChanges } from "../http.js";
+import { asPhoneInput, normalizePhone } from "../lib/phone.js";
 import {
   askCopilot,
   extractLeadsFromText,
@@ -21,9 +25,20 @@ import {
   runQualification,
 } from "../services/ai-flows.js";
 import { enroll, stopEnrollments } from "../services/automation.js";
-import { addActivity, createLead, getLead, leadInputSchema, updateLead } from "../services/leads.js";
+import {
+  addActivity,
+  createLead,
+  findLeadByPhone,
+  getLead,
+  leadInputSchema,
+  updateLead,
+} from "../services/leads.js";
 import { getConversation, sendToLead, whatsAppTarget } from "../services/messaging.js";
+import { renderPlaybookMessage, scheduleFirstMessages } from "../services/outreach.js";
 import { getSettings } from "../settings.js";
+
+export { renderPlaybookMessage } from "../services/outreach.js";
+
 
 export const listQuerySchema = z.object({
   search: z.string().trim().optional(),
@@ -31,6 +46,9 @@ export const listQuerySchema = z.object({
   temperature: z.enum(["frio", "morno", "quente"]).optional(),
   source: z.string().optional(),
   chatMode: z.enum(["bot", "human"]).optional(),
+  playbookId: z.string().optional(),
+  // never = nunca recebeu mensagem nossa; queued = tem envio na fila; sent = já mandamos e ainda não respondeu; replied = já respondeu
+  contact: z.enum(["never", "queued", "sent", "replied"]).optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(100),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -54,7 +72,43 @@ export function leadFilters(q: z.infer<typeof listQuerySchema>): SQL | undefined
   if (q.temperature) where.push(eq(leads.temperature, q.temperature));
   if (q.source) where.push(eq(leads.source, q.source));
   if (q.chatMode) where.push(eq(leads.chatMode, q.chatMode));
+  if (q.playbookId) {
+    if (q.playbookId === "none") {
+      where.push(isNull(leads.playbookId));
+    } else {
+      const pid = parseInt(q.playbookId, 10);
+      if (!Number.isNaN(pid)) {
+        where.push(eq(leads.playbookId, pid));
+      }
+    }
+  }
+  if (q.contact) {
+    const sentOk = sql`exists (select 1 from ${messages} m where m.lead_id = ${leads.id} and m.direction = 'out' and m.status <> 'failed')`;
+    const replied = sql`exists (select 1 from ${messages} m where m.lead_id = ${leads.id} and m.direction = 'in')`;
+    const queued = sql`exists (select 1 from ${scheduledMessages} s where s.lead_id = ${leads.id} and s.status = 'pending')`;
+    if (q.contact === "never") where.push(sql`not ${sentOk} and not ${replied} and not ${queued}`);
+    if (q.contact === "queued") where.push(queued);
+    if (q.contact === "sent") where.push(sql`${sentOk} and not ${replied}`);
+    if (q.contact === "replied") where.push(replied);
+  }
   return where.length ? and(...where) : undefined;
+}
+
+const INVALID_PHONE = "Telefone inválido. Use DDD + número (ex.: 11999998888).";
+const META_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * API oficial da Meta: fora da janela de 24h desde a última mensagem do contato, só templates aprovados
+ * são entregues (e o CRM envia só texto). Avisa antes de você escrever para quem não falou com você.
+ */
+function startWarning(ctx: AppContext, lead: Lead): string | null {
+  if (ctx.wa.name !== "meta") return null;
+  const last = lead.lastInboundAt?.getTime();
+  if (last !== undefined && ctx.now().getTime() - last < META_WINDOW_MS) return null;
+  return (
+    "Pela API oficial da Meta, só dá para iniciar uma conversa com um modelo (template) aprovado. " +
+    "Como este contato não te escreveu nas últimas 24h, uma mensagem de texto comum provavelmente será recusada."
+  );
 }
 
 export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
@@ -73,6 +127,89 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
   app.post("/api/leads", async (req) => {
     const body = parse(leadInputSchema, req.body);
     return createLead(ctx, body, { userId: currentUserId(req) });
+  });
+
+  app.post("/api/leads/bulk/playbook", async (req) => {
+    const body = parse(
+      z.object({
+        leadIds: z.array(z.number().int()).min(1).max(200),
+        playbookId: z.number().int().nullable(),
+        chatMode: z.enum(["bot", "human"]).optional(),
+        firstMessage: z
+          .object({
+            send: z.boolean(),
+            text: z.string(),
+            intervalMinutes: z.number().int().min(1).max(120).optional().default(1),
+          })
+          .optional(),
+      }),
+      req.body,
+    );
+
+    if (body.firstMessage?.send && !body.firstMessage.text.trim()) {
+      throw new HttpError(400, "Escreva a primeira mensagem antes de disparar.");
+    }
+
+    let playbook: Playbook | null = null;
+    if (body.playbookId != null) {
+      const [pb] = await db.select().from(playbooks).where(eq(playbooks.id, body.playbookId));
+      if (!pb) throw new HttpError(400, `O roteiro #${body.playbookId} não existe.`);
+      playbook = pb;
+    }
+
+    const uniqueIds = [...new Set(body.leadIds)];
+    const leadRows = await db.select().from(leads).where(inArray(leads.id, uniqueIds));
+    const leadsMap = new Map(leadRows.map((l) => [l.id, l]));
+
+    let updated = 0;
+    const targetLeads: Lead[] = [];
+
+    for (const id of uniqueIds) {
+      const lead = leadsMap.get(id);
+      if (!lead) continue;
+
+      const patch: Partial<typeof leads.$inferInsert> = {
+        playbookId: body.playbookId,
+        updatedAt: ctx.now(),
+      };
+      if (body.chatMode) {
+        patch.chatMode = body.chatMode;
+      }
+
+      const [up] = await db.update(leads).set(patch).where(eq(leads.id, id)).returning();
+      if (up) {
+        updated++;
+        await addActivity(
+          db,
+          id,
+          "playbook",
+          playbook ? `Roteiro aplicado: ${playbook.name}` : "Roteiro removido",
+          undefined,
+          currentUserId(req),
+        );
+        ctx.events.emit("lead.updated", { lead: up });
+        targetLeads.push(up);
+      } else {
+        targetLeads.push(lead);
+      }
+    }
+
+    let queued = 0;
+    let skipped: Array<{ leadId: number; reason: string }> = [];
+    let lastSendAt: string | null = null;
+
+    if (body.firstMessage?.send) {
+      const scheduled = await scheduleFirstMessages(ctx, targetLeads, {
+        text: body.firstMessage.text,
+        intervalMinutes: body.firstMessage.intervalMinutes,
+        userId: currentUserId(req),
+      });
+      queued = scheduled.queued;
+      skipped = scheduled.skipped;
+      lastSendAt = scheduled.lastSendAt;
+    }
+
+    return { updated, queued, skipped, lastSendAt };
   });
 
   app.get("/api/leads/:id", async (req) => {
@@ -177,15 +314,20 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
       .insert(scheduledMessages)
       .values({ leadId: id, body: body.body, sendAt: body.sendAt, createdBy: currentUserId(req) })
       .returning();
+    ctx.events.emit("scheduled.updated", { leadId: id, id: row.id });
     return row;
   });
 
   app.delete("/api/scheduled/:id", async (req) => {
     const id = idParam(req);
-    await db
+    const [row] = await db
       .update(scheduledMessages)
-      .set({ status: "canceled" })
-      .where(and(eq(scheduledMessages.id, id), eq(scheduledMessages.status, "pending")));
+      .set({ status: "canceled", error: "cancelada por você" })
+      .where(and(eq(scheduledMessages.id, id), eq(scheduledMessages.status, "pending")))
+      .returning();
+    if (row) {
+      ctx.events.emit("scheduled.updated", { leadId: row.leadId, id: row.id });
+    }
     return { ok: true };
   });
 
@@ -211,7 +353,7 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
 
   app.post("/api/leads/:id/copilot/ask", async (req) => {
     const body = parse(
-      z.object({ question: z.string().trim().min(1).max(2000), draft: z.string().max(4096).optional() }),
+      z.object({ question: z.string().trim().min(1).max(8000), draft: z.string().max(4096).optional() }),
       req.body,
     );
     return askCopilot(ctx, idParam(req), body.question, body.draft?.trim() || undefined);
@@ -266,6 +408,52 @@ export async function leadRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   // ---- Caixa de entrada ----
+  /**
+   * Nova conversa (como no WhatsApp Web): acha o lead pelo telefone ou cria um, sem enviar nada.
+   * A conversa só entra na lista de conversas depois da primeira mensagem.
+   */
+  app.post("/api/conversations/start", async (req) => {
+    const body = parse(
+      // Telefone curto demais cai no normalizePhone, com a mesma mensagem amigável
+      z.object({ phone: z.string().trim().max(40), name: z.string().trim().max(200).nullish() }),
+      req.body,
+    );
+    const phone = normalizePhone(body.phone);
+    if (!phone) throw new HttpError(400, INVALID_PHONE);
+    const userId = currentUserId(req);
+    const respond = (lead: Lead, created: boolean) => ({ lead, created, warning: startWarning(ctx, lead) });
+
+    const existing = await findLeadByPhone(db, phone);
+    if (existing) return respond(existing, false);
+
+    if (ctx.wa.checkNumber) {
+      try {
+        const check = await ctx.wa.checkNumber(phone);
+        if (!check.exists) throw new HttpError(422, "Este número não tem WhatsApp.");
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        // Desconectado ou fora do ar: não dá para conferir agora, mas a conversa pode ser criada
+        ctx.log.warn({ err: String(err) }, "não deu para conferir se o número tem WhatsApp");
+      }
+    }
+
+    try {
+      const lead = await createLead(
+        ctx,
+        { phone: asPhoneInput(phone), name: body.name, source: "manual", chatMode: "human" },
+        { userId },
+      );
+      return respond(lead, true);
+    } catch (err) {
+      // Outra requisição (ou uma mensagem recebida) criou o mesmo contato ao mesmo tempo
+      if (err instanceof HttpError && err.statusCode === 409) {
+        const raced = await findLeadByPhone(db, phone);
+        if (raced) return respond(raced, false);
+      }
+      throw err;
+    }
+  });
+
   app.get("/api/conversations", async (req) => {
     const q = parse(
       listQuerySchema.extend({

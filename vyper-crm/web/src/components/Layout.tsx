@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessagesSquare,
+  Radar,
   Settings as SettingsIcon,
   Users,
   Workflow,
@@ -18,6 +19,7 @@ const NAV = [
   { to: "/conversas", label: "Conversas", icon: MessagesSquare },
   { to: "/funil", label: "Funil", icon: KanbanSquare },
   { to: "/leads", label: "Leads", icon: Users },
+  { to: "/prospeccao", label: "Prospecção", icon: Radar },
   { to: "/automacoes", label: "Automações", icon: Workflow },
   { to: "/configuracoes", label: "Configurações", icon: SettingsIcon },
 ];

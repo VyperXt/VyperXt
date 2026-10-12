@@ -1,9 +1,12 @@
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, sql, type SQL } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
-import { enrollments, leads, scheduledMessages, sequences } from "../db/schema.js";
+import { enrollments, leads, playbooks, scheduledMessages, sequences } from "../db/schema.js";
 import { HttpError, idParam, parse, requireChanges } from "../http.js";
+import { getQueueState, getSettings, setQueueState } from "../settings.js";
+import { nextSendWindowStart } from "../services/automation.js";
+import { nextScheduledDate } from "../services/outreach.js";
 
 const stepSchema = z.object({
   delayMinutes: z.number().int().min(0).max(60 * 24 * 90),
@@ -88,19 +91,153 @@ export async function automationRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   app.get("/api/scheduled", async () => {
-    return db
+    const selectFields = {
+      id: scheduledMessages.id,
+      body: scheduledMessages.body,
+      sendAt: scheduledMessages.sendAt,
+      status: scheduledMessages.status,
+      error: scheduledMessages.error,
+      author: scheduledMessages.author,
+      batchId: scheduledMessages.batchId,
+      createdAt: scheduledMessages.createdAt,
+      leadId: leads.id,
+      leadName: sql<string>`coalesce(${leads.name}, ${leads.waName}, ${leads.phone})`,
+      leadPhone: leads.phone,
+      playbookName: playbooks.name,
+    };
+
+    const pending = await db
+      .select(selectFields)
+      .from(scheduledMessages)
+      .innerJoin(leads, eq(leads.id, scheduledMessages.leadId))
+      .leftJoin(playbooks, eq(playbooks.id, leads.playbookId))
+      .where(eq(scheduledMessages.status, "pending"))
+      .orderBy(asc(scheduledMessages.sendAt));
+
+    const nonPending = await db
+      .select(selectFields)
+      .from(scheduledMessages)
+      .innerJoin(leads, eq(leads.id, scheduledMessages.leadId))
+      .leftJoin(playbooks, eq(playbooks.id, leads.playbookId))
+      .where(ne(scheduledMessages.status, "pending"))
+      .orderBy(desc(scheduledMessages.sendAt))
+      .limit(100);
+
+    return [...pending, ...nonPending];
+  });
+
+  app.post("/api/scheduled/cancel", async (req) => {
+    const cancelBodySchema = z.object({
+      ids: z.array(z.number().int()).min(1).max(500).optional(),
+      batchId: z.string().trim().min(1).optional(),
+      all: z.boolean().optional(),
+    });
+    const body = parse(cancelBodySchema, req.body);
+
+    const hasIds = body.ids !== undefined;
+    const hasBatchId = body.batchId !== undefined;
+    const hasAll = body.all === true;
+
+    const activeCount = [hasIds, hasBatchId, hasAll].filter(Boolean).length;
+    if (activeCount !== 1 || (body.all !== undefined && body.all !== true)) {
+      throw new HttpError(400, "Informe exatamente uma opção: ids, batchId ou all.");
+    }
+
+    const conds: SQL[] = [eq(scheduledMessages.status, "pending")];
+    if (hasIds) {
+      conds.push(inArray(scheduledMessages.id, body.ids!));
+    } else if (hasBatchId) {
+      conds.push(eq(scheduledMessages.batchId, body.batchId!));
+    }
+
+    const updated = await db
+      .update(scheduledMessages)
+      .set({ status: "canceled", error: "cancelada por você" })
+      .where(and(...conds))
+      .returning({ id: scheduledMessages.id, leadId: scheduledMessages.leadId });
+
+    for (const row of updated) {
+      ctx.events.emit("scheduled.updated", { id: row.id, leadId: row.leadId });
+    }
+
+    return { canceled: updated.length };
+  });
+
+  app.get("/api/scheduled/status", async () => {
+    return getQueueState(db);
+  });
+
+  app.post("/api/scheduled/resume", async () => {
+    const state = await setQueueState(db, { pausedUntil: null, reason: null });
+    ctx.events.emit("scheduled.updated", {});
+    return state;
+  });
+
+  app.post("/api/scheduled/retry", async (req) => {
+    const retryBodySchema = z.object({
+      ids: z.array(z.number().int()).min(1).max(500).optional(),
+      all: z.boolean().optional(),
+      intervalMinutes: z.number().int().min(1).max(120).optional(),
+    });
+    const body = parse(retryBodySchema, req.body);
+
+    const hasIds = body.ids !== undefined;
+    const hasAll = body.all === true;
+
+    const activeCount = [hasIds, hasAll].filter(Boolean).length;
+    if (activeCount !== 1 || (body.all !== undefined && body.all !== true)) {
+      throw new HttpError(400, "Informe exatamente uma opção: ids ou all.");
+    }
+
+    const conds: SQL[] = [eq(scheduledMessages.status, "failed")];
+    if (hasIds) {
+      conds.push(inArray(scheduledMessages.id, body.ids!));
+    }
+
+    const rows = await db
       .select({
         id: scheduledMessages.id,
-        body: scheduledMessages.body,
+        leadId: scheduledMessages.leadId,
         sendAt: scheduledMessages.sendAt,
-        status: scheduledMessages.status,
-        error: scheduledMessages.error,
-        leadId: leads.id,
-        leadName: sql<string>`coalesce(${leads.name}, ${leads.waName}, ${leads.phone})`,
+        batchId: scheduledMessages.batchId,
+        optedOut: leads.optedOut,
       })
       .from(scheduledMessages)
       .innerJoin(leads, eq(leads.id, scheduledMessages.leadId))
-      .orderBy(desc(scheduledMessages.sendAt))
-      .limit(200);
+      .where(and(...conds))
+      .orderBy(asc(scheduledMessages.sendAt), asc(scheduledMessages.id));
+
+    const eligible = rows.filter((r) => !r.optedOut);
+    if (eligible.length === 0) {
+      return { requeued: 0, lastSendAt: null };
+    }
+
+    const settings = await getSettings(db);
+    const timezone = ctx.config.APP_TIMEZONE;
+    const intervalMinutes = body.intervalMinutes ?? 5;
+    const now = ctx.now();
+    let plannedDate = nextSendWindowStart(settings, new Date(now.getTime() + 60_000), timezone);
+
+    for (let i = 0; i < eligible.length; i++) {
+      const row = eligible[i]!;
+
+      if (i > 0) {
+        plannedDate = nextScheduledDate(plannedDate, intervalMinutes, settings, timezone);
+      }
+
+      await db
+        .update(scheduledMessages)
+        .set({
+          status: "pending",
+          error: null,
+          sendAt: plannedDate,
+        })
+        .where(eq(scheduledMessages.id, row.id));
+
+      ctx.events.emit("scheduled.updated", { id: row.id, leadId: row.leadId });
+    }
+
+    ctx.events.emit("scheduled.updated", {});
+    return { requeued: eligible.length, lastSendAt: plannedDate.toISOString() };
   });
 }

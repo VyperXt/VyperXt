@@ -13,6 +13,7 @@ import {
   sequences,
   stages,
   users,
+  playbooks,
   type Lead,
   type Stage,
 } from "../db/schema.js";
@@ -120,6 +121,7 @@ export const leadInputSchema = z.object({
   temperature: z.enum(["frio", "morno", "quente"]).optional(),
   score: z.number().int().min(0).max(100).optional(),
   optedOut: z.boolean().optional(),
+  playbookId: z.number().int().nullish(),
 });
 export type LeadInput = z.infer<typeof leadInputSchema>;
 
@@ -138,7 +140,10 @@ function clean(v: string | null | undefined): string | null {
 }
 
 /** Etapa e responsável precisam existir (senão o banco recusaria com erro 500). */
-async function assertReferences(db: Db, refs: { stageId?: number | null; ownerId?: number | null }): Promise<void> {
+async function assertReferences(
+  db: Db,
+  refs: { stageId?: number | null; ownerId?: number | null; playbookId?: number | null },
+): Promise<void> {
   if (refs.stageId != null) {
     const [st] = await db.select({ id: stages.id }).from(stages).where(eq(stages.id, refs.stageId));
     if (!st) throw new HttpError(400, `A etapa #${refs.stageId} não existe.`);
@@ -146,6 +151,10 @@ async function assertReferences(db: Db, refs: { stageId?: number | null; ownerId
   if (refs.ownerId != null) {
     const [u] = await db.select({ id: users.id }).from(users).where(eq(users.id, refs.ownerId));
     if (!u) throw new HttpError(400, `O usuário #${refs.ownerId} não existe.`);
+  }
+  if (refs.playbookId != null) {
+    const [pb] = await db.select({ id: playbooks.id }).from(playbooks).where(eq(playbooks.id, refs.playbookId));
+    if (!pb) throw new HttpError(400, `O roteiro #${refs.playbookId} não existe.`);
   }
 }
 
@@ -168,7 +177,7 @@ async function insertLead(
   phone: string | null,
   opts: { userId?: number | null; waJid?: string | null },
 ): Promise<Lead | null> {
-  await assertReferences(ctx.db, { stageId: input.stageId, ownerId: input.ownerId });
+  await assertReferences(ctx.db, { stageId: input.stageId, ownerId: input.ownerId, playbookId: input.playbookId });
   const settings = await getSettings(ctx.db);
   const stageId = input.stageId ?? (await getDefaultStageId(ctx.db));
   const [lead] = await ctx.db
@@ -182,6 +191,7 @@ async function insertLead(
       company: clean(input.company),
       source: input.source || "manual",
       stageId,
+      playbookId: input.playbookId ?? null,
       ownerId: input.ownerId ?? null,
       value: input.value ?? null,
       interest: clean(input.interest),
@@ -192,6 +202,7 @@ async function insertLead(
       chatMode: input.chatMode ?? settings.bot.defaultMode,
       temperature: input.temperature ?? "frio",
       score: input.score ?? 0,
+      optedOut: input.optedOut ?? false,
     })
     .onConflictDoNothing() // mesmo telefone ou mesmo LID
     .returning();
@@ -363,7 +374,7 @@ export async function updateLead(
   opts: { userId?: number | null; reason?: string } = {},
 ): Promise<Lead> {
   const before = await getLead(ctx.db, id);
-  await assertReferences(ctx.db, { stageId: patch.stageId, ownerId: patch.ownerId });
+  await assertReferences(ctx.db, { stageId: patch.stageId, ownerId: patch.ownerId, playbookId: patch.playbookId });
   const values: Partial<typeof leads.$inferInsert> = { updatedAt: ctx.now() };
   if (patch.name !== undefined) values.name = clean(patch.name);
   if (patch.phone !== undefined) {
@@ -389,6 +400,7 @@ export async function updateLead(
   if (patch.temperature !== undefined) values.temperature = patch.temperature;
   if (patch.score !== undefined) values.score = patch.score;
   if (patch.optedOut !== undefined) values.optedOut = patch.optedOut;
+  if (patch.playbookId !== undefined) values.playbookId = patch.playbookId;
 
   const [lead] = await ctx.db.update(leads).set(values).where(eq(leads.id, id)).returning();
 
@@ -416,6 +428,19 @@ export async function updateLead(
       id,
       "chat_mode",
       patch.chatMode === "bot" ? "IA assumiu a conversa" : "Conversa passou para atendimento humano",
+      undefined,
+      opts.userId,
+    );
+  }
+  if (patch.playbookId !== undefined && patch.playbookId !== before.playbookId) {
+    const [pb] = patch.playbookId
+      ? await ctx.db.select().from(playbooks).where(eq(playbooks.id, patch.playbookId))
+      : [undefined];
+    await addActivity(
+      ctx.db,
+      id,
+      "playbook",
+      pb ? `Roteiro definido: ${pb.name}` : "Roteiro removido",
       undefined,
       opts.userId,
     );

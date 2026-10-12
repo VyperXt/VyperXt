@@ -1,14 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Flame, MessageCircle, X, XCircle } from "lucide-react";
+import { CheckCircle2, Flame, MessageCircle, Sparkles, X, XCircle } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, getToken } from "./api";
 import { leadName } from "./format";
-import type { CrmEvent, Lead, SettingsResponse, Stage, User } from "./types";
+import type { CrmEvent, Lead, LeadDetail, Playbook, ProspectSearchSummary, SampleSummary, SettingsResponse, Stage, User } from "./types";
 
 // ---------- Toasts ----------
 interface Toast {
   id: number;
-  kind: "success" | "error" | "info" | "hot";
+  kind: "success" | "error" | "info" | "hot" | "sample";
   text: string;
   onClick?: () => void;
 }
@@ -28,6 +28,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     error: <XCircle className="size-4 text-red-600" />,
     info: <MessageCircle className="size-4 text-sky-600" />,
     hot: <Flame className="size-4 text-red-600" />,
+    sample: <Sparkles className="size-4 text-violet-600" />,
   };
   return (
     <ToastCtx.Provider value={push}>
@@ -78,6 +79,10 @@ export function RealtimeProvider({ children, onNavigate }: { children: ReactNode
   const [connected, setConnected] = useState(false);
   const navRef = useRef(onNavigate);
   navRef.current = onNavigate;
+  // Último status visto de cada prospecção (para avisar quando uma que estava rodando termina)
+  const prospectStatus = useRef(new Map<number, string>());
+  // Último status visto de cada amostra (para avisar quando a que estava sendo criada fica pronta)
+  const sampleStatus = useRef(new Map<number, string>());
 
   useEffect(() => {
     const token = getToken();
@@ -119,7 +124,50 @@ export function RealtimeProvider({ children, onNavigate }: { children: ReactNode
           }
         }
         if (event.type === "copilot.updated" && leadId) qc.invalidateQueries({ queryKey: ["copilot", leadId] });
+        // Fila de envios: uma mensagem saiu, falhou ou foi cancelada (ou um disparo entrou na fila)
+        if (event.type === "scheduled.updated" || event.type === "message.sent") {
+          qc.invalidateQueries({ queryKey: ["scheduled"] });
+          if (leadId) qc.invalidateQueries({ queryKey: ["lead", leadId] });
+        }
         if (event.type === "whatsapp.connection") qc.invalidateQueries({ queryKey: ["whatsapp-status"] });
+        const search = event.data.search as ProspectSearchSummary | undefined;
+        if (event.type === "prospect.updated" && search) {
+          qc.invalidateQueries({ queryKey: ["prospect-searches"] });
+          qc.invalidateQueries({ queryKey: ["prospect-search", search.id] });
+          const before = prospectStatus.current.get(search.id);
+          prospectStatus.current.set(search.id, search.status);
+          // Pesquisa leva minutos: se você saiu da tela, avisa quando terminar
+          if (before === "running" && search.status !== "running" && !location.pathname.startsWith("/prospeccao")) {
+            const goTo = () => navRef.current(`/prospeccao?pesquisa=${search.id}`);
+            if (search.status === "done")
+              toast({ kind: "success", text: `Prospecção pronta: ${search.resultCount} empresa(s) encontrada(s).`, onClick: goTo });
+            if (search.status === "failed") toast({ kind: "error", text: `A prospecção falhou: ${search.error ?? ""}`, onClick: goTo });
+          }
+        }
+
+        const sample = event.data.sample as SampleSummary | undefined;
+        if (event.type === "sample.updated" && sample) {
+          qc.invalidateQueries({ queryKey: ["samples", sample.leadId] });
+          qc.invalidateQueries({ queryKey: ["sample", sample.id] });
+          const before = sampleStatus.current.get(sample.id);
+          sampleStatus.current.set(sample.id, sample.status);
+          // Ficou pronta (não é só a publicação) e você não está nessa conversa → avisa
+          if (
+            sample.status === "ready" &&
+            before !== "ready" &&
+            !sample.publishedAt &&
+            !location.pathname.endsWith(`/${sample.leadId}`)
+          ) {
+            const goTo = () => navRef.current(`/conversas/${sample.leadId}`);
+            const what = sample.kind === "site" ? "Site demo pronto" : "Arte pronta";
+            qc.fetchQuery({ queryKey: ["lead", sample.leadId], queryFn: () => api<LeadDetail>(`/leads/${sample.leadId}`) })
+              .then((d) => toast({ kind: "sample", text: `${what} para ${leadName(d.lead)} — revise e envie.`, onClick: goTo }))
+              .catch(() => toast({ kind: "sample", text: `${what} — revise e envie.`, onClick: goTo }));
+          }
+          if (sample.status === "failed" && before === "generating" && !location.pathname.endsWith(`/${sample.leadId}`)) {
+            toast({ kind: "error", text: `Não foi possível criar a amostra: ${sample.error ?? ""}`, onClick: () => navRef.current(`/conversas/${sample.leadId}`) });
+          }
+        }
 
         // Avisos
         const lead = event.data.lead as Lead | undefined;
@@ -160,5 +208,9 @@ export function useStages() {
 
 export function useSettings() {
   return useQuery({ queryKey: ["settings"], queryFn: () => api<SettingsResponse>("/settings") });
+}
+
+export function usePlaybooks() {
+  return useQuery({ queryKey: ["playbooks"], queryFn: () => api<Playbook[]>("/playbooks") });
 }
 

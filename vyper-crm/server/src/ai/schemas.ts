@@ -73,3 +73,49 @@ export const followupSchema = z.object({
   reason: z.string().describe("Motivo curto da decisão."),
 });
 export type FollowupOutput = z.infer<typeof followupSchema>;
+
+export const prospectSchema = z.object({
+  prospects: z
+    .array(
+      z.object({
+        company: z.string().describe("Nome da empresa/negócio como aparece na fonte."),
+        contactName: z.string().describe("Nome do responsável/dono, se aparecer publicamente. Vazio se não souber."),
+        phone: z
+          .string()
+          .describe("Telefone exatamente como aparece na fonte. Se a empresa divulga um WhatsApp (wa.me, botão/ícone de WhatsApp, \"WhatsApp:\" na bio ou na ficha), use esse número. Vazio se não achar."),
+        email: z.string().describe("E-mail comercial encontrado na fonte. Vazio se não achar."),
+        website: z.string().describe("Site oficial (URL completa). Vazio se não houver."),
+        instagram: z.string().describe("Perfil do Instagram (URL ou @usuario). Vazio se não houver."),
+        address: z.string().describe("Endereço como aparece na fonte. Vazio se não souber."),
+        city: z.string().describe("Cidade (e UF, se souber)."),
+        size: z.string().describe("Porte estimado (ex.: MEI, pequena, média, grande) e por quê, em poucas palavras."),
+        fitReason: z.string().describe("Por que esta empresa combina com a oferta, em 1 ou 2 frases."),
+        approach: z.string().describe("Primeira mensagem de WhatsApp sugerida: curta, pessoal, sem cara de spam."),
+        score: z.number().int().describe("Nota de 0 a 100 do encaixe com a oferta."),
+        sources: z.array(z.string()).describe("URLs das páginas onde os dados foram encontrados (pelo menos uma)."),
+      }),
+    )
+    .describe("Empresas reais encontradas na pesquisa."),
+  notes: z.string().describe("Observações curtas sobre a pesquisa (ex.: dificuldades, região com poucos resultados)."),
+});
+export type ProspectOutput = z.infer<typeof prospectSchema>;
+
+export const sampleSiteSchema = z.object({
+  title: z.string().describe("Título curto da amostra (ex.: 'Site demo — Padaria Bom Pão')."),
+  html: z
+    .string()
+    .describe("Página HTML completa e autossuficiente (<!doctype html> ... </html>), com CSS embutido."),
+  caption: z
+    .string()
+    .describe("Mensagem curta e simpática de WhatsApp para enviar junto com o link (o sistema acrescenta o link)."),
+  notes: z.string().describe("Observações curtas para o vendedor (até 3 frases): o que ficou genérico e o que conferir antes de enviar."),
+});
+export type SampleSiteOutput = z.infer<typeof sampleSiteSchema>;
+
+export const sampleImageSchema = z.object({
+  title: z.string().describe("Título curto da amostra (ex.: 'Post de lançamento — Studio Ana')."),
+  svg: z.string().describe('Arte em SVG completa (<svg ... viewBox="0 0 1080 1350"> ... </svg>), só com formas e textos.'),
+  caption: z.string().describe("Mensagem curta e simpática de WhatsApp para enviar junto com a imagem."),
+  notes: z.string().describe("Observações curtas para o vendedor (até 3 frases): o que ficou genérico e o que conferir antes de enviar."),
+});
+export type SampleImageOutput = z.infer<typeof sampleImageSchema>;

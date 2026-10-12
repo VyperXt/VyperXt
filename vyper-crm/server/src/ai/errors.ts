@@ -21,6 +21,6 @@ export class AiRefusalError extends Error {}
 
 export class AiUnavailableError extends Error {
   constructor() {
-    super("IA desativada: configure ANTHROPIC_API_KEY ou OPENROUTER_API_KEY no arquivo .env");
+    super("IA desativada: configure OPENROUTER_API_KEY (AI_PROVIDER=openrouter), ANTHROPIC_API_KEY ou AI_PROVIDER=claude-code (sua assinatura) no arquivo .env");
   }
 }
