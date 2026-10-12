@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Copy, Plus, QrCode, RefreshCw, Save, Sparkles, Trash2, XCircle } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { PageHeader } from "../components/Layout";
+import { PlaybookAssistant } from "../components/PlaybookAssistant";
 import { Badge, Button, Empty, Field, Modal, Spinner, Toggle } from "../components/ui";
 import { api, setToken } from "../lib/api";
 import { useErrorToast, useMe, useRealtime, useSettings, useStages, useToast } from "../lib/app-state";
@@ -684,6 +685,8 @@ function PlaybooksTab() {
   });
   const [editing, setEditing] = useState<Playbook | "new" | null>(null);
   const [deleting, setDeleting] = useState<Playbook | null>(null);
+  // Assistente de IA: "new" = criar um roteiro do zero conversando
+  const [assisting, setAssisting] = useState<Playbook | "new" | null>(null);
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["playbooks"] });
@@ -710,9 +713,14 @@ function PlaybooksTab() {
           <p className="text-xs text-slate-500">
             {playbooks.data ? `${playbooks.data.length} roteiro(s) cadastrado(s)` : "Carregando..."}
           </p>
-          <Button size="sm" icon={<Plus className="size-4" />} onClick={() => setEditing("new")}>
-            Novo roteiro
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" icon={<Plus className="size-4" />} onClick={() => setEditing("new")}>
+              Novo roteiro
+            </Button>
+            <Button size="sm" icon={<Sparkles className="size-4" />} onClick={() => setAssisting("new")}>
+              Criar com IA
+            </Button>
+          </div>
         </div>
 
         {playbooks.isLoading && <Spinner className="m-4" />}
@@ -753,6 +761,14 @@ function PlaybooksTab() {
                   )}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<Sparkles className="size-3.5 text-violet-600" />}
+                    onClick={() => setAssisting(p)}
+                  >
+                    Ajustar com IA
+                  </Button>
                   <Button variant="secondary" size="sm" onClick={() => setEditing(p)}>
                     Editar
                   </Button>
@@ -779,6 +795,17 @@ function PlaybooksTab() {
           onSaved={() => {
             refresh();
             setEditing(null);
+          }}
+        />
+      )}
+
+      {assisting && (
+        <PlaybookAssistant
+          playbook={assisting === "new" ? null : assisting}
+          onClose={() => setAssisting(null)}
+          onSaved={() => {
+            refresh();
+            setAssisting(null);
           }}
         />
       )}

@@ -1,10 +1,13 @@
 import { asc, eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { playbookAssistantSystem } from "../ai/prompts.js";
+import { playbookAssistantSchema } from "../ai/schemas.js";
 import type { AppContext } from "../context.js";
 import { type Db } from "../db/client.js";
 import { playbooks, type Playbook } from "../db/schema.js";
 import { HttpError, idParam, parse } from "../http.js";
+import { getSettings } from "../settings.js";
 
 export interface PlaybookWithCount extends Playbook {
   leadCount: number;
@@ -27,6 +30,47 @@ export const updatePlaybookSchema = z.object({
   handoffRules: z.string().optional(),
   firstMessage: z.string().optional(),
 });
+
+export const playbookAssistantRequestSchema = z.object({
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string().min(1, "Mensagem não pode ser vazia.").max(6000, "Mensagem muito longa (máximo 6000 caracteres)."),
+      }),
+    )
+    .min(1, "Envie pelo menos uma mensagem.")
+    .max(40, "Máximo de 40 mensagens.")
+    .refine((msgs) => msgs[msgs.length - 1]?.role === "user", {
+      message: "A última mensagem deve ser do usuário.",
+    }),
+  draft: z
+    .object({
+      name: z.string().optional(),
+      goal: z.string().optional(),
+      offer: z.string().optional(),
+      instructions: z.string().optional(),
+      handoffRules: z.string().optional(),
+      firstMessage: z.string().optional(),
+    })
+    .optional(),
+  playbookId: z.number().int().optional(),
+});
+
+export interface PlaybookAssistantResponse {
+  reply: string;
+  draft: {
+    name: string;
+    goal: string;
+    offer: string;
+    instructions: string;
+    handoffRules: string;
+    firstMessage: string;
+  };
+  done: boolean;
+  provider: "claude-code" | "ai";
+}
+
 
 export async function getPlaybookWithCount(db: Db, id: number): Promise<PlaybookWithCount> {
   const [row] = await db
@@ -110,5 +154,73 @@ export async function playbookRoutes(app: FastifyInstance, ctx: AppContext) {
     await getPlaybookWithCount(db, id);
     await db.delete(playbooks).where(eq(playbooks.id, id));
     return { ok: true };
+  });
+
+  app.post("/api/playbooks/assistant", async (req): Promise<PlaybookAssistantResponse> => {
+    const body = parse(playbookAssistantRequestSchema, req.body);
+
+    const provider = ctx.claude ?? (ctx.ai.enabled ? ctx.ai : null);
+    if (!provider) {
+      throw new HttpError(
+        503,
+        "O assistente de roteiros usa o Claude Code: defina CLAUDE_CODE_ENABLED=true no .env e reinicie o CRM.",
+      );
+    }
+    const providerKind: "claude-code" | "ai" = ctx.claude ? "claude-code" : "ai";
+
+    const settings = await getSettings(db);
+    const existing = await db.select({ name: playbooks.name }).from(playbooks);
+    const existingNames = existing.map((p) => p.name);
+    const system = playbookAssistantSystem(settings, existingNames);
+
+    const currentDraft = {
+      name: body.draft?.name ?? "",
+      goal: body.draft?.goal ?? "",
+      offer: body.draft?.offer ?? "",
+      instructions: body.draft?.instructions ?? "",
+      handoffRules: body.draft?.handoffRules ?? "",
+      firstMessage: body.draft?.firstMessage ?? "",
+    };
+
+    const promptParts: string[] = [
+      `Rascunho atual:\n${JSON.stringify(currentDraft, null, 2)}`,
+    ];
+
+    if (body.playbookId !== undefined) {
+      promptParts.push(`Ajustando o roteiro existente #${body.playbookId}`);
+    }
+
+    const transcript = body.messages
+      .map((m) => `${m.role === "user" ? "Usuário" : "Assistente"}: ${m.content}`)
+      .join("\n\n");
+    promptParts.push(`Conversa:\n${transcript}`);
+    promptParts.push("Responda à última mensagem do usuário.");
+
+    const prompt = promptParts.join("\n\n");
+
+    const out = await provider.generate({
+      task: "playbook_assistant",
+      system,
+      prompt,
+      schema: playbookAssistantSchema,
+      effort: "medium",
+      timeoutMs: 150_000,
+    });
+
+    const cleanedDraft = {
+      name: (out.draft?.name ?? "").trim().slice(0, 80),
+      goal: (out.draft?.goal ?? "").trim(),
+      offer: (out.draft?.offer ?? "").trim(),
+      instructions: (out.draft?.instructions ?? "").trim(),
+      handoffRules: (out.draft?.handoffRules ?? "").trim(),
+      firstMessage: (out.draft?.firstMessage ?? "").trim(),
+    };
+
+    return {
+      reply: (out.reply ?? "").trim(),
+      draft: cleanedDraft,
+      done: Boolean(out.done),
+      provider: providerKind,
+    };
   });
 }

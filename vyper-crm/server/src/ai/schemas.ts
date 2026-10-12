@@ -119,3 +119,18 @@ export const sampleImageSchema = z.object({
   notes: z.string().describe("Observações curtas para o vendedor (até 3 frases): o que ficou genérico e o que conferir antes de enviar."),
 });
 export type SampleImageOutput = z.infer<typeof sampleImageSchema>;
+
+export const playbookAssistantSchema = z.object({
+  reply: z.string().describe("Texto do assistente para o chat (pt-BR, curto)."),
+  draft: z.object({
+    name: z.string().describe("Nome curto do roteiro."),
+    goal: z.string().describe("Objetivo da conversa e o que conta como sucesso."),
+    offer: z.string().describe("O que é o produto/serviço e destaques a citar."),
+    instructions: z.string().describe("Tom de voz, abordagem, qualificação e objeções."),
+    handoffRules: z.string().describe("Quando passar para um atendente humano."),
+    firstMessage: z.string().describe("Primeira mensagem de prospecção fria."),
+  }),
+  done: z.boolean().describe("true se o roteiro está pronto para salvar."),
+});
+export type PlaybookAssistantOutput = z.infer<typeof playbookAssistantSchema>;
+

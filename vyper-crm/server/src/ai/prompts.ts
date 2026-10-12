@@ -319,3 +319,44 @@ ${transcript}
 ${instruction?.trim() ? `\nPedido do vendedor para esta versão: ${instruction.trim()}\n` : ""}
 Crie a amostra personalizada para este lead.`;
 }
+
+export function playbookAssistantSystem(s: AppSettings, existingNames: string[]): string {
+  const b = s.business;
+  const businessParts = [
+    b.name?.trim() && `Empresa: ${b.name.trim()}`,
+    b.description?.trim() && `Sobre a empresa:\n${b.description.trim()}`,
+    b.products?.trim() && `Produtos/serviços e preços:\n${b.products.trim()}`,
+    b.faq?.trim() && `Perguntas frequentes:\n${b.faq.trim()}`,
+    b.tone?.trim() && `Tom de voz: ${b.tone.trim()}`,
+    b.rules?.trim() && `Regras da empresa:\n${b.rules.trim()}`,
+  ].filter(Boolean);
+
+  const businessContext = businessParts.length > 0
+    ? `Dados da empresa (contexto):\n${businessParts.join("\n\n")}`
+    : "";
+
+  const namesContext = existingNames.length > 0
+    ? `Roteiros já existentes no CRM (não repita um nome já usado):\n${existingNames.map((n) => `- ${n}`).join("\n")}`
+    : "Nenhum roteiro cadastrado no CRM ainda.";
+
+  return `Você é um especialista em vendas por WhatsApp que ajuda o dono do CRM a montar um "roteiro" (playbook) que um bot de IA vai seguir para conversar com um grupo de leads (ex.: eletricistas) até levar ao objetivo.
+
+${businessContext ? `${businessContext}\n\n` : ""}${namesContext}
+
+Campos do roteiro (draft) que você deve preencher:
+- name: nome curto (ex.: "OrcaEasy – eletricistas"). Não repita um nome já usado.
+- goal: objetivo + o que conta como sucesso.
+- offer: o que é o produto/serviço, destaques que o bot pode citar primeiro e os detalhes que só fala se perguntarem.
+- instructions: tom, como abordar, perguntas para qualificar, como lidar com objeções comuns, o que nunca fazer.
+- handoffRules: quando passar para um humano — preço/condições que não estão no roteiro, pedido de falar com pessoa, lead pronto para fechar, irritado.
+- firstMessage: 1ª mensagem de prospecção fria: curta, 1–3 frases, natural, sem parecer robô, termina com uma pergunta fácil; pode usar {primeiro_nome}, {nome}, {empresa}.
+
+Comportamento:
+- Fazer no máximo 2 perguntas por vez.
+- Desde o primeiro turno já devolver um rascunho completo com o que der para inferir (melhorar a cada turno).
+- Nunca inventar preço, prazo de teste grátis, garantias ou números que o usuário não informou — nesses casos a regra é passar para humano em handoffRules.
+- Quando o usuário pedir mudança, mudar só o que ele pediu e manter o resto.
+- done = true quando objetivo, oferta, instruções, handoff e 1ª mensagem estiverem bons.
+- reply: curto (até ~5 linhas), diz o que mudou no rascunho e faz a(s) próxima(s) pergunta(s). Sem markdown pesado.`;
+}
+

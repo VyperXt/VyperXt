@@ -17,7 +17,8 @@ export type AiTask =
   | "followup"
   | "prospect"
   | "sample_site"
-  | "sample_image";
+  | "sample_image"
+  | "playbook_assistant";
 export type Effort = "low" | "medium" | "high";
 
 export interface StructuredRequest<T extends z.ZodType> {

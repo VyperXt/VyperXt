@@ -121,6 +121,18 @@ export class FakeAi implements AiProvider {
       caption: "Oi! Fiz uma arte de exemplo para vocês:",
       notes: "",
     }),
+    playbook_assistant: () => ({
+      reply: "Me conta o produto.",
+      draft: {
+        name: "",
+        goal: "",
+        offer: "",
+        instructions: "",
+        handoffRules: "",
+        firstMessage: "",
+      },
+      done: false,
+    }),
   };
 
   async generate<T extends z.ZodType>(req: StructuredRequest<T>): Promise<z.infer<T>> {
