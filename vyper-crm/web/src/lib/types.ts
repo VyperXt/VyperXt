@@ -220,6 +220,10 @@ export interface ProspectCriteria {
   offer: string;
   quantity: number;
   extra: string;
+  /** Filtros obrigatórios (o servidor descarta quem não passa). Pesquisas antigas não têm os campos. */
+  excludeWithWebsite?: boolean;
+  requireWhatsapp?: boolean;
+  requireInstagram?: boolean;
 }
 
 export interface ProspectResult {
@@ -233,6 +237,8 @@ export interface ProspectResult {
   email: string;
   website: string;
   instagram: string;
+  /** Link da bio do Instagram (pesquisas antigas não têm) */
+  bioLink?: string;
   address: string;
   city: string;
   size: string;

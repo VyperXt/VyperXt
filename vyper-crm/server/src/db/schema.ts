@@ -228,6 +228,9 @@ export interface ProspectCriteria {
   offer: string;
   quantity: number;
   extra: string;
+  excludeWithWebsite?: boolean;
+  requireWhatsapp?: boolean;
+  requireInstagram?: boolean;
 }
 
 // Empresa encontrada na web, já tratada (telefone normalizado, duplicados marcados)
@@ -242,6 +245,7 @@ export interface ProspectResult {
   email: string;
   website: string;
   instagram: string;
+  bioLink?: string;
   address: string;
   city: string;
   size: string;

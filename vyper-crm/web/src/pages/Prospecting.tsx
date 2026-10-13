@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
+  Link2,
+  Pencil,
   AtSign,
   CircleStop,
   Copy,
@@ -48,7 +50,24 @@ const STATUS: Record<ProspectStatus, { label: string; cls: string }> = {
   canceled: { label: "Cancelada", cls: "bg-slate-100 text-slate-600 ring-1 ring-slate-200" },
 };
 
-const BLANK: ProspectCriteria = { niche: "", location: "", size: "", offer: "", quantity: 10, extra: "" };
+const BLANK: ProspectCriteria = {
+  niche: "",
+  location: "",
+  size: "",
+  offer: "",
+  quantity: 10,
+  extra: "",
+  excludeWithWebsite: false,
+  requireWhatsapp: false,
+  requireInstagram: false,
+};
+
+// Filtros que o servidor aplica de verdade: quem não passa é descartado e não conta na quantidade
+const HARD_FILTERS = [
+  { key: "requireWhatsapp", label: "Só com WhatsApp", hint: "celular que tem WhatsApp" },
+  { key: "excludeWithWebsite", label: "Sem site", hint: "nem link de site/Linktree na bio do Instagram" },
+  { key: "requireInstagram", label: "Com Instagram", hint: "perfil comercial no Instagram" },
+] as const;
 
 /** Só links da web (o servidor já filtra; aqui é a segunda trava antes de virar href). */
 const safeHref = (url: string) => (/^https?:\/\//i.test(url) ? url : null);
@@ -258,6 +277,9 @@ function SearchForm({
           offer: value.offer.trim(),
           quantity: value.quantity,
           extra: value.extra.trim(),
+          excludeWithWebsite: Boolean(value.excludeWithWebsite),
+          requireWhatsapp: Boolean(value.requireWhatsapp),
+          requireInstagram: Boolean(value.requireInstagram),
         },
       }),
     onSuccess: ({ search }) => {
@@ -367,6 +389,27 @@ function SearchForm({
             onChange={(e) => set({ offer: e.target.value })}
           />
         </Field>
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-slate-700">Filtros obrigatórios</p>
+          <div className="flex flex-wrap gap-2">
+            {HARD_FILTERS.map((f) => {
+              const on = Boolean(value[f.key]);
+              return (
+                <label
+                  key={f.key}
+                  title={f.hint}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium ring-1 transition select-none ${
+                    on ? "bg-brand-50 text-brand-700 ring-brand-200" : "bg-white text-slate-600 ring-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  <input type="checkbox" className="size-3.5 accent-brand-600" checked={on} onChange={(e) => set({ [f.key]: e.target.checked })} />
+                  {f.label}
+                </label>
+              );
+            })}
+          </div>
+          <p className="mt-1 text-xs text-slate-500">Quem não passar é descartado na hora e a IA continua buscando até completar a quantidade.</p>
+        </div>
         <Field label="Observações">
           <textarea
             className="input"
@@ -532,6 +575,15 @@ function SearchDetail({ id, onBack, onReuse }: { id: number; onBack: () => void;
               {c.location}
               {c.size && ` · ${c.size}`} · até {c.quantity} empresa(s)
             </p>
+            {HARD_FILTERS.some((f) => c[f.key]) && (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {HARD_FILTERS.filter((f) => c[f.key]).map((f) => (
+                  <Badge key={f.key} className="bg-brand-50 text-brand-700 ring-1 ring-brand-100">
+                    {f.label}
+                  </Badge>
+                ))}
+              </div>
+            )}
             <p className="text-xs text-slate-400">
               {formatDateTime(search.createdAt)}
               {search.finishedAt && ` · levou ${formatElapsed(elapsed)}`}
@@ -861,17 +913,66 @@ function Results({ search }: { search: ProspectSearch }) {
       </Modal>
       <ul className="space-y-3">
         {search.results.map((r, i) => (
-          <ResultCard key={i} r={r} checked={selected.has(i)} canSelect={importable(r)} onToggle={() => toggle(i)} />
+          <ResultCard
+            key={`${i}-${r.company}`}
+            r={r}
+            searchId={search.id}
+            index={i}
+            editable={search.status === "done" && !r.leadId}
+            checked={selected.has(i)}
+            canSelect={importable(r)}
+            onToggle={() => toggle(i)}
+            // Remover muda os índices dos que vêm depois: limpa a seleção para não importar a empresa errada
+            onRemoved={() => setSelected(new Set())}
+          />
         ))}
       </ul>
     </div>
   );
 }
 
-function ResultCard({ r, checked, canSelect, onToggle }: { r: ProspectResult; checked: boolean; canSelect: boolean; onToggle: () => void }) {
+function ResultCard({
+  r,
+  searchId,
+  index,
+  editable,
+  checked,
+  canSelect,
+  onToggle,
+  onRemoved,
+}: {
+  r: ProspectResult;
+  searchId: number;
+  index: number;
+  editable: boolean;
+  checked: boolean;
+  canSelect: boolean;
+  onToggle: () => void;
+  onRemoved: () => void;
+}) {
   const navigate = useNavigate();
   const toast = useToast();
+  const qc = useQueryClient();
+  const onError = useErrorToast();
+  const [editing, setEditing] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  useEffect(() => {
+    if (!confirmRemove) return;
+    const t = setTimeout(() => setConfirmRemove(false), 4000);
+    return () => clearTimeout(t);
+  }, [confirmRemove]);
+  const remove = useMutation({
+    mutationFn: () => api<{ ok: boolean }>(`/prospecting/searches/${searchId}/results/${index}`, { method: "DELETE" }),
+    onSuccess: () => {
+      onRemoved();
+      qc.invalidateQueries({ queryKey: ["prospect-search", searchId] });
+      qc.invalidateQueries({ queryKey: ["prospect-searches"] });
+      toast({ kind: "success", text: `${r.company || "Empresa"} removida da lista.` });
+    },
+    onError,
+  });
   const website = safeHref(r.website);
+  const bioLink = r.bioLink && r.bioLink !== r.website ? safeHref(r.bioLink) : null;
   const instagram = safeHref(r.instagram);
   const sources = r.sources.map(safeHref).filter((u): u is string => Boolean(u));
   const name = r.company || "Empresa sem nome";
@@ -919,6 +1020,27 @@ function ResultCard({ r, checked, canSelect, onToggle }: { r: ProspectResult; ch
               </div>
               {(r.city || r.size) && <p className="text-xs text-slate-500">{[r.city, r.size].filter(Boolean).join(" · ")}</p>}
             </div>
+            {editable && (
+              <div className="flex items-center gap-1">
+                <Button variant="secondary" size="sm" icon={<Pencil className="size-3.5" />} onClick={() => setEditing(true)}>
+                  Editar
+                </Button>
+                {confirmRemove ? (
+                  <Button variant="danger" size="sm" loading={remove.isPending} onClick={() => remove.mutate()}>
+                    Remover?
+                  </Button>
+                ) : (
+                  <button
+                    className="rounded p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                    onClick={() => setConfirmRemove(true)}
+                    aria-label={`Remover ${name} da lista`}
+                    title="Remover da lista"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                )}
+              </div>
+            )}
             {r.leadId &&
               (noWhatsApp ? (
                 <span title="Este número não tem WhatsApp (conferido com e sem o 9). Use o e-mail ou o site da empresa.">
@@ -977,11 +1099,16 @@ function ResultCard({ r, checked, canSelect, onToggle }: { r: ProspectResult; ch
 
           {r.fitReason && <p className="mt-2 text-sm text-slate-600">{r.fitReason}</p>}
 
-          {(website || instagram || sources.length > 0) && (
+          {(website || bioLink || instagram || sources.length > 0) && (
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
               {website && (
                 <a href={website} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sky-700 hover:underline">
                   <Globe className="size-3.5" /> {hostOf(website)}
+                </a>
+              )}
+              {bioLink && (
+                <a href={bioLink} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sky-700 hover:underline" title="Link da bio do Instagram">
+                  <Link2 className="size-3.5" /> bio: {hostOf(bioLink)}
                 </a>
               )}
               {instagram && (
@@ -1021,6 +1148,92 @@ function ResultCard({ r, checked, canSelect, onToggle }: { r: ProspectResult; ch
           )}
         </div>
       </div>
+      {editing && <ResultEditModal r={r} searchId={searchId} index={index} onClose={() => setEditing(false)} />}
     </li>
+  );
+}
+
+const EDIT_FIELDS = [
+  { key: "company", label: "Empresa", max: 200, placeholder: "" },
+  { key: "contactName", label: "Responsável", max: 200, placeholder: "" },
+  { key: "phone", label: "Telefone / WhatsApp", max: 100, placeholder: "(31) 99999-9999" },
+  { key: "email", label: "E-mail", max: 200, placeholder: "" },
+  { key: "instagram", label: "Instagram", max: 300, placeholder: "@perfil ou link" },
+  { key: "website", label: "Site", max: 300, placeholder: "" },
+  { key: "city", label: "Cidade", max: 120, placeholder: "" },
+] as const;
+
+type EditKey = (typeof EDIT_FIELDS)[number]["key"] | "approach";
+
+/** Corrige os dados de um resultado antes de importar (o servidor renormaliza o telefone). */
+function ResultEditModal({ r, searchId, index, onClose }: { r: ProspectResult; searchId: number; index: number; onClose: () => void }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const initial: Record<EditKey, string> = {
+    company: r.company,
+    contactName: r.contactName,
+    // Mostra o número como veio da fonte quando não deu para validar
+    phone: r.phone ? formatPhone(r.phone) : r.rawPhone,
+    email: r.email,
+    instagram: r.instagram,
+    website: r.website,
+    city: r.city,
+    approach: r.approach,
+  };
+  const [f, setF] = useState(initial);
+  const keys = Object.keys(f) as EditKey[];
+  const changedKeys = keys.filter((k) => f[k].trim() !== initial[k].trim());
+  const save = useMutation({
+    // Só manda o que mudou (um telefone novo perde a conferência do WhatsApp)
+    mutationFn: () =>
+      api<ProspectResult>(`/prospecting/searches/${searchId}/results/${index}`, {
+        method: "PATCH",
+        body: Object.fromEntries(changedKeys.map((k) => [k, f[k].trim()])),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["prospect-search", searchId] });
+      toast({ kind: "success", text: "Dados atualizados." });
+      onClose();
+    },
+  });
+  return (
+    <Modal open onClose={onClose} title={`Editar ${r.company || "empresa"}`} wide>
+      <form
+        className="space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (changedKeys.length) save.mutate();
+        }}
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          {EDIT_FIELDS.map((field) => (
+            <Field key={field.key} label={field.label}>
+              <input
+                className="input"
+                maxLength={field.max}
+                placeholder={field.placeholder || undefined}
+                value={f[field.key]}
+                onChange={(e) => setF({ ...f, [field.key]: e.target.value })}
+              />
+            </Field>
+          ))}
+        </div>
+        <Field label="Sugestão de primeira mensagem">
+          <textarea className="input" rows={3} maxLength={1000} value={f.approach} onChange={(e) => setF({ ...f, approach: e.target.value })} />
+        </Field>
+        {changedKeys.includes("phone") && (
+          <p className="text-xs text-slate-500">Telefone novo: depois de salvar, use “Verificar WhatsApp” para conferir se ele tem WhatsApp.</p>
+        )}
+        {save.error && <p className="text-sm text-red-600">{save.error.message}</p>}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" loading={save.isPending} disabled={!changedKeys.length}>
+            Salvar
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }

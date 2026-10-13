@@ -4,6 +4,7 @@ import type { AppContext } from "../context.js";
 import { currentUserId, HttpError, idParam, parse } from "../http.js";
 import {
   cancelProspectSearch,
+  deleteProspectResult,
   deleteProspectSearch,
   getProspectSearch,
   importProspects,
@@ -11,7 +12,14 @@ import {
   prospectCriteriaSchema,
   recheckProspectsWhatsApp,
   startProspectSearch,
+  updateProspectResult,
 } from "../services/prospecting.js";
+
+function indexParam(req: { params: unknown }): number {
+  const index = Number((req.params as { index?: string }).index);
+  if (!Number.isInteger(index) || index < 0) throw new HttpError(400, "Índice inválido.");
+  return index;
+}
 
 export async function prospectingRoutes(app: FastifyInstance, ctx: AppContext) {
   app.post(
@@ -38,6 +46,32 @@ export async function prospectingRoutes(app: FastifyInstance, ctx: AppContext) {
 
   // Confere de novo quem tem WhatsApp (pesquisas antigas, ou WhatsApp desconectado na hora da pesquisa)
   app.post("/api/prospecting/searches/:id/check-whatsapp", async (req) => recheckProspectsWhatsApp(ctx, idParam(req)));
+
+  app.patch("/api/prospecting/searches/:id/results/:index", async (req) => {
+    const id = idParam(req);
+    const index = indexParam(req);
+    const body = parse(
+      z.object({
+        company: z.string().optional(),
+        contactName: z.string().optional(),
+        phone: z.string().optional(),
+        email: z.string().optional(),
+        website: z.string().optional(),
+        instagram: z.string().optional(),
+        city: z.string().optional(),
+        approach: z.string().optional(),
+      }),
+      req.body,
+    );
+    return updateProspectResult(ctx, id, index, body);
+  });
+
+  app.delete("/api/prospecting/searches/:id/results/:index", async (req) => {
+    const id = idParam(req);
+    const index = indexParam(req);
+    await deleteProspectResult(ctx, id, index);
+    return { ok: true };
+  });
 
   app.post("/api/prospecting/searches/:id/import", async (req) => {
     const id = idParam(req);
