@@ -133,14 +133,19 @@ export function PlaybookAssistant({
   };
 
   // Rola o chat para o fim e conta o tempo da resposta (o Claude pode levar quase 1 min)
-  useEffect(() => chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" }), [turns, ask.isPending]);
+  // Chaves: no Chrome novo scrollIntoView devolve uma Promise, e o React a trataria como função de limpeza
+  useEffect(() => {
+    chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [turns, ask.isPending]);
   useEffect(() => {
     if (!ask.isPending) return;
     setElapsed(0);
     const t = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, [ask.isPending]);
-  useEffect(() => inputRef.current?.focus(), []);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   const dirty = FIELDS.some((f) => draft[f.key] !== initial.current[f.key]);
   const requestClose = () => (dirty && !save.isSuccess ? setConfirmClose(true) : onClose());

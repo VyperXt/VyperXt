@@ -377,6 +377,74 @@ async function runScheduledMessage(ctx: AppContext, id: number): Promise<boolean
   }
 }
 
+export const OVERDUE_GRACE_MS = 2 * 60_000;
+
+/** Empurra para frente os disparos atrasados, mantendo o espaçamento original entre as mensagens. */
+export async function reflowOverdueBatches(ctx: AppContext, now: Date): Promise<number /* mensagens remarcadas */> {
+  const pending = await ctx.db
+    .select({
+      id: scheduledMessages.id,
+      batchId: scheduledMessages.batchId,
+      sendAt: scheduledMessages.sendAt,
+    })
+    .from(scheduledMessages)
+    .where(
+      and(
+        eq(scheduledMessages.status, "pending"),
+        eq(scheduledMessages.author, "automation"),
+      ),
+    )
+    .orderBy(asc(scheduledMessages.sendAt));
+
+  if (pending.length === 0) return 0;
+
+  // Agrupa por batch_id (itens com batch_id nulo: cada um é seu próprio grupo)
+  const groups = new Map<string, typeof pending>();
+  for (const item of pending) {
+    const key = item.batchId && item.batchId.trim() ? `batch:${item.batchId.trim()}` : `single:${item.id}`;
+    const list = groups.get(key);
+    if (list) {
+      list.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  }
+
+  const updates: Array<{ id: number; sendAt: Date }> = [];
+
+  for (const group of groups.values()) {
+    group.sort((a, b) => a.sendAt.getTime() - b.sendAt.getTime());
+    const first = group[0];
+    if (!first) continue;
+
+    // Se o PRIMEIRO estiver atrasado há mais de OVERDUE_GRACE_MS = 2 * 60_000 (send_at < now - 2 min)
+    if (first.sendAt.getTime() < now.getTime() - OVERDUE_GRACE_MS) {
+      const deltaMs = now.getTime() - first.sendAt.getTime();
+      for (const item of group) {
+        updates.push({
+          id: item.id,
+          sendAt: new Date(item.sendAt.getTime() + deltaMs),
+        });
+      }
+    }
+  }
+
+  if (updates.length === 0) return 0;
+
+  for (const u of updates) {
+    await ctx.db
+      .update(scheduledMessages)
+      .set({ sendAt: u.sendAt })
+      .where(eq(scheduledMessages.id, u.id));
+  }
+
+  ctx.events.emit("scheduled.updated", {});
+  const count = updates.length;
+  ctx.log.info({ count }, "disparos atrasados remarcados");
+
+  return count;
+}
+
 /** Uma rodada do agendador: dispara follow-ups e mensagens agendadas que já venceram. */
 export async function runSchedulerTick(ctx: AppContext): Promise<{ steps: number; scheduled: number }> {
   const settings = await getSettings(ctx.db);
@@ -387,6 +455,8 @@ export async function runSchedulerTick(ctx: AppContext): Promise<{ steps: number
   if (queue.pausedUntil && new Date(queue.pausedUntil).getTime() > now.getTime()) {
     return { steps: 0, scheduled: 0 };
   }
+
+  await reflowOverdueBatches(ctx, now);
 
   const dueScheduled = await ctx.db
     .select({ id: scheduledMessages.id, author: scheduledMessages.author })
