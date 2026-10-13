@@ -1,11 +1,11 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { AppContext } from "../context.js";
 import { enrollments, leads, scheduledMessages, sequences, type Lead, type Message, type Sequence } from "../db/schema.js";
-import { getSettings, type AppSettings } from "../settings.js";
+import { getQueueState, getSettings, setQueueState, type AppSettings } from "../settings.js";
 import { AiRateLimitError } from "../ai/errors.js";
 import { composeFollowup } from "./ai-flows.js";
 import { addActivity, getLead, HttpError } from "./leads.js";
-import { sendToLead, whatsAppTarget } from "./messaging.js";
+import { isTransientSendError, sendToLead, whatsAppTarget } from "./messaging.js";
 
 const MINUTE = 60_000;
 
@@ -73,6 +73,8 @@ async function activeSequences(ctx: AppContext, trigger: Sequence["trigger"]): P
 /** Gatilho "lead criado": vale para leads de formulário, n8n, importação e cadastro manual. */
 export async function onLeadCreated(ctx: AppContext, lead: Lead): Promise<void> {
   if (lead.source === "whatsapp" || !lead.phone || lead.optedOut) return;
+  // Empresas achadas pela prospecção com IA nunca pediram contato: só você inicia a conversa
+  if (lead.source === "prospeccao-ia") return;
   for (const seq of await activeSequences(ctx, "lead_created")) {
     if (seq.steps.length) await enroll(ctx, lead.id, seq.id, "lead criado").catch(() => {});
   }
@@ -126,6 +128,64 @@ export function isWithinSendWindow(settings: AppSettings, now: Date, timezone: s
   const end = minutesOf(a.sendWindowEnd);
   return start <= end ? current >= start && current < end : current >= start || current < end;
 }
+
+/**
+ * Se a data cair fora da janela de envio configurada, calcula o início da próxima janela
+ * no fuso horário informado. Se a janela estiver desligada ou a data já estiver dentro dela,
+ * devolve a própria data.
+ */
+export function nextSendWindowStart(settings: AppSettings, date: Date, timezone: string): Date {
+  const a = settings.automation;
+  if (!a.sendWindowEnabled || isWithinSendWindow(settings, date, timezone)) {
+    return date;
+  }
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  })
+    .formatToParts(date)
+    .reduce<Record<string, string>>((acc, p) => ({ ...acc, [p.type]: p.value }), {});
+
+  const currentSeconds = Number(parts.hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second);
+  const startSeconds = minutesOf(a.sendWindowStart) * 60;
+  const endSeconds = minutesOf(a.sendWindowEnd) * 60;
+
+  let secondsToAdd: number;
+  if (startSeconds <= endSeconds) {
+    if (currentSeconds < startSeconds) {
+      secondsToAdd = startSeconds - currentSeconds;
+    } else {
+      secondsToAdd = (24 * 3600 - currentSeconds) + startSeconds;
+    }
+  } else {
+    // Janela que vira a noite (ex.: 22:00 às 06:00). Fora da janela: >= end && < start
+    secondsToAdd = startSeconds - currentSeconds;
+  }
+
+  // Zera os milissegundos restantes
+  let candidate = new Date(date.getTime() + secondsToAdd * 1000 - date.getMilliseconds());
+
+  // Ajuste fino caso haja transição de fuso horário / horário de verão
+  const candParts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  })
+    .formatToParts(candidate)
+    .reduce<Record<string, string>>((acc, p) => ({ ...acc, [p.type]: p.value }), {});
+  const candSeconds = Number(candParts.hour) * 3600 + Number(candParts.minute) * 60 + Number(candParts.second);
+  if (candSeconds !== startSeconds) {
+    candidate = new Date(candidate.getTime() + (startSeconds - candSeconds) * 1000);
+  }
+
+  return candidate;
+}
+
 
 /** "ai_limit" = acabou a cota do dia da IA (o agendador para a rodada para não gastar pedidos à toa). */
 async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings: AppSettings): Promise<"ai_limit" | void> {
@@ -224,18 +284,165 @@ async function runEnrollmentStep(ctx: AppContext, enrollmentId: number, settings
     .where(and(eq(enrollments.id, e.id), eq(enrollments.status, "active"), isNull(enrollments.nextRunAt)));
 }
 
-async function runScheduledMessage(ctx: AppContext, id: number): Promise<void> {
+let lastAutomationSendAt = 0;
+
+export function resetLastAutomationSendAtForTest(): void {
+  lastAutomationSendAt = 0;
+}
+
+export async function pauseQueueOnTransientError(
+  ctx: AppContext,
+  scheduledId?: number,
+  reason = "WhatsApp desconectado",
+): Promise<void> {
+  const now = ctx.now();
+  const pauseUntil = new Date(now.getTime() + 30 * MINUTE);
+  const retryTimeStr = new Intl.DateTimeFormat("en-GB", {
+    timeZone: ctx.config.APP_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(pauseUntil);
+
+  const errorMsg = `WhatsApp desconectado; nova tentativa às ${retryTimeStr}`;
+
+  await setQueueState(ctx.db, {
+    pausedUntil: pauseUntil.toISOString(),
+    reason: reason.slice(0, 200),
+  });
+
+  // Empurra TODAS as pendentes: sendAt = max(sendAt, agora) + 30 min (mantém a ordem)
+  await ctx.db
+    .update(scheduledMessages)
+    .set({
+      sendAt: sql`greatest(${scheduledMessages.sendAt}, ${now.toISOString()}::timestamptz) + interval '30 minutes'`,
+    })
+    .where(eq(scheduledMessages.status, "pending"));
+
+  if (scheduledId) {
+    await ctx.db
+      .update(scheduledMessages)
+      .set({ status: "pending", error: errorMsg })
+      .where(eq(scheduledMessages.id, scheduledId));
+  }
+
+  ctx.events.emit("scheduled.updated", scheduledId ? { id: scheduledId } : {});
+}
+
+async function runScheduledMessage(ctx: AppContext, id: number): Promise<boolean | "transient_failure"> {
   const [sm] = await ctx.db.select().from(scheduledMessages).where(eq(scheduledMessages.id, id));
-  if (!sm || sm.status !== "pending") return;
+  if (!sm || sm.status !== "pending") return false;
+
+  const lead = await getLead(ctx.db, sm.leadId).catch(() => null);
+  if (!lead || lead.optedOut) {
+    await ctx.db
+      .update(scheduledMessages)
+      .set({ status: "canceled", error: "pediu para não receber mensagens" })
+      .where(eq(scheduledMessages.id, id));
+    ctx.events.emit("scheduled.updated", { id, leadId: sm.leadId });
+    return false;
+  }
+
   try {
-    await sendToLead(ctx, sm.leadId, sm.body, { author: "agent", userId: sm.createdBy });
-    await ctx.db.update(scheduledMessages).set({ status: "sent" }).where(eq(scheduledMessages.id, id));
+    await sendToLead(ctx, sm.leadId, sm.body, {
+      author: sm.author,
+      userId: sm.createdBy,
+      deleteOnTransientError: true,
+    });
+    await ctx.db.update(scheduledMessages).set({ status: "sent", error: null }).where(eq(scheduledMessages.id, id));
+    ctx.events.emit("scheduled.updated", { id, leadId: sm.leadId });
+    return true;
   } catch (err) {
+    if (err instanceof HttpError && err.statusCode === 409) {
+      await ctx.db
+        .update(scheduledMessages)
+        .set({ status: "canceled", error: "pediu para não receber mensagens" })
+        .where(eq(scheduledMessages.id, id));
+      ctx.events.emit("scheduled.updated", { id, leadId: sm.leadId });
+      return false;
+    }
+
+    if (isTransientSendError(err)) {
+      const reason = err instanceof Error && err.message ? err.message.slice(0, 200) : "WhatsApp desconectado";
+      await pauseQueueOnTransientError(ctx, id, reason);
+      return "transient_failure";
+    }
+
     await ctx.db
       .update(scheduledMessages)
       .set({ status: "failed", error: (err as Error).message.slice(0, 500) })
       .where(eq(scheduledMessages.id, id));
+    ctx.events.emit("scheduled.updated", { id, leadId: sm.leadId });
+    return false;
   }
+}
+
+export const OVERDUE_GRACE_MS = 2 * 60_000;
+
+/** Empurra para frente os disparos atrasados, mantendo o espaçamento original entre as mensagens. */
+export async function reflowOverdueBatches(ctx: AppContext, now: Date): Promise<number /* mensagens remarcadas */> {
+  const pending = await ctx.db
+    .select({
+      id: scheduledMessages.id,
+      batchId: scheduledMessages.batchId,
+      sendAt: scheduledMessages.sendAt,
+    })
+    .from(scheduledMessages)
+    .where(
+      and(
+        eq(scheduledMessages.status, "pending"),
+        eq(scheduledMessages.author, "automation"),
+      ),
+    )
+    .orderBy(asc(scheduledMessages.sendAt));
+
+  if (pending.length === 0) return 0;
+
+  // Agrupa por batch_id (itens com batch_id nulo: cada um é seu próprio grupo)
+  const groups = new Map<string, typeof pending>();
+  for (const item of pending) {
+    const key = item.batchId && item.batchId.trim() ? `batch:${item.batchId.trim()}` : `single:${item.id}`;
+    const list = groups.get(key);
+    if (list) {
+      list.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  }
+
+  const updates: Array<{ id: number; sendAt: Date }> = [];
+
+  for (const group of groups.values()) {
+    group.sort((a, b) => a.sendAt.getTime() - b.sendAt.getTime());
+    const first = group[0];
+    if (!first) continue;
+
+    // Se o PRIMEIRO estiver atrasado há mais de OVERDUE_GRACE_MS = 2 * 60_000 (send_at < now - 2 min)
+    if (first.sendAt.getTime() < now.getTime() - OVERDUE_GRACE_MS) {
+      const deltaMs = now.getTime() - first.sendAt.getTime();
+      for (const item of group) {
+        updates.push({
+          id: item.id,
+          sendAt: new Date(item.sendAt.getTime() + deltaMs),
+        });
+      }
+    }
+  }
+
+  if (updates.length === 0) return 0;
+
+  for (const u of updates) {
+    await ctx.db
+      .update(scheduledMessages)
+      .set({ sendAt: u.sendAt })
+      .where(eq(scheduledMessages.id, u.id));
+  }
+
+  ctx.events.emit("scheduled.updated", {});
+  const count = updates.length;
+  ctx.log.info({ count }, "disparos atrasados remarcados");
+
+  return count;
 }
 
 /** Uma rodada do agendador: dispara follow-ups e mensagens agendadas que já venceram. */
@@ -244,13 +451,19 @@ export async function runSchedulerTick(ctx: AppContext): Promise<{ steps: number
   const now = ctx.now();
   if (!isWithinSendWindow(settings, now, ctx.config.APP_TIMEZONE)) return { steps: 0, scheduled: 0 };
 
+  const queue = await getQueueState(ctx.db);
+  if (queue.pausedUntil && new Date(queue.pausedUntil).getTime() > now.getTime()) {
+    return { steps: 0, scheduled: 0 };
+  }
+
+  await reflowOverdueBatches(ctx, now);
+
   const dueScheduled = await ctx.db
-    .select({ id: scheduledMessages.id })
+    .select({ id: scheduledMessages.id, author: scheduledMessages.author })
     .from(scheduledMessages)
     .where(and(eq(scheduledMessages.status, "pending"), lte(scheduledMessages.sendAt, now)))
     .orderBy(asc(scheduledMessages.sendAt))
     .limit(50);
-  for (const { id } of dueScheduled) await runScheduledMessage(ctx, id);
 
   const due = await ctx.db
     .select({ id: enrollments.id })
@@ -267,16 +480,62 @@ export async function runSchedulerTick(ctx: AppContext): Promise<{ steps: number
     )
     .orderBy(asc(enrollments.nextRunAt))
     .limit(50);
+
+  if (dueScheduled.length > 0 || due.length > 0) {
+    let connected = true;
+    if (typeof ctx.wa?.status === "function") {
+      try {
+        const conn = await ctx.wa.status();
+        connected = Boolean(conn.connected);
+      } catch {
+        connected = false;
+      }
+    }
+    if (!connected) {
+      const firstDue = dueScheduled[0];
+      await pauseQueueOnTransientError(ctx, firstDue?.id, "WhatsApp desconectado");
+      return { steps: 0, scheduled: 0 };
+    }
+  }
+
+  let automationSentThisTick = false;
+  let scheduledSentCount = 0;
+
+  for (const item of dueScheduled) {
+    if (item.author === "automation") {
+      if (automationSentThisTick) {
+        // No máximo 1 mensagem de author automation por tick
+        continue;
+      }
+      if (now.getTime() - lastAutomationSendAt < 60_000) {
+        // Intervalo mínimo de 60s entre envios de automation
+        continue;
+      }
+    }
+
+    const res = await runScheduledMessage(ctx, item.id);
+    if (res === "transient_failure") {
+      return { steps: 0, scheduled: scheduledSentCount };
+    }
+    if (res === true) {
+      scheduledSentCount++;
+      if (item.author === "automation") {
+        lastAutomationSendAt = ctx.now().getTime();
+        automationSentThisTick = true;
+      }
+    }
+  }
+
   for (const { id } of due) {
     if ((await runEnrollmentStep(ctx, id, settings)) === "ai_limit") break;
   }
 
-  return { steps: due.length, scheduled: dueScheduled.length };
+  return { steps: due.length, scheduled: scheduledSentCount };
 }
 
 export function startScheduler(ctx: AppContext, intervalMs: number): () => void {
   let running = false;
-  const timer = setInterval(async () => {
+  const tick = async () => {
     if (running) return;
     running = true;
     try {
@@ -286,6 +545,9 @@ export function startScheduler(ctx: AppContext, intervalMs: number): () => void 
     } finally {
       running = false;
     }
-  }, intervalMs);
+  };
+  // Garante que o tick roda logo na inicialização para os atrasados saírem após um reinício
+  void tick();
+  const timer = setInterval(tick, intervalMs);
   return () => clearInterval(timer);
 }

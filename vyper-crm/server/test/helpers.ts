@@ -1,20 +1,80 @@
 import type { z } from "zod";
-import type { AiProvider, AiTask, StructuredRequest } from "../src/ai/provider.js";
+import { AiError, type AiProvider, type AiTask, type ResearchRequest, type StructuredRequest } from "../src/ai/provider.js";
 import { buildApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import type { AppContext, Logger } from "../src/context.js";
 import { openDatabase } from "../src/db/client.js";
 import { EventBus } from "../src/lib/events.js";
 import { KeyedRunner } from "../src/lib/keyed-runner.js";
+import type { PublishedFile, SitePublisher } from "../src/lib/publisher.js";
 import { ensureDefaultData } from "../src/services/leads.js";
 import { SimulatorProvider } from "../src/whatsapp/simulator.js";
 
+/** Netlify falso: guarda cada deploy (o conjunto completo de arquivos) e pode falhar uma vez. */
+export class FakePublisher implements SitePublisher {
+  readonly name = "netlify" as const;
+  readonly deploys: PublishedFile[][] = [];
+  failNext: string | null = null;
+  siteUrl = "https://demo.test";
+
+  async publish(files: PublishedFile[]): Promise<{ siteUrl: string }> {
+    if (this.failNext) {
+      const msg = this.failNext;
+      this.failNext = null;
+      throw new Error(msg);
+    }
+    this.deploys.push(files.map((f) => ({ ...f })));
+    return { siteUrl: this.siteUrl };
+  }
+
+  /** Caminhos do último deploy */
+  lastPaths(): string[] {
+    return (this.deploys.at(-1) ?? []).map((f) => f.path);
+  }
+}
+
+/** SVG mínimo válido (1080x1350) com acentos — para as amostras de imagem falsas */
+export const SAMPLE_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350">' +
+  '<rect width="1080" height="1350" fill="#123456"/>' +
+  '<text x="540" y="675" font-family="Noto Sans, DejaVu Sans, Arial, sans-serif" font-size="64" fill="#fff" text-anchor="middle">Promoção de Ação</text>' +
+  "</svg>";
+
+/** HTML mínimo válido — para as amostras de site falsas */
+export const SAMPLE_HTML =
+  '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="robots" content="noindex">' +
+  "<title>Demo</title></head><body><h1>Padaria Exemplo</h1><footer>Demonstração</footer></body></html>";
+
 type Handler = (req: StructuredRequest<z.ZodType>) => unknown;
+type ResearchHandler = (req: ResearchRequest<z.ZodType>) => unknown;
 
 export class FakeAi implements AiProvider {
   readonly enabled = true;
   readonly model = "fake-model";
+  /** Todas as chamadas (generate e research), na ordem */
   calls: Array<StructuredRequest<z.ZodType>> = [];
+  /** Resposta da pesquisa na web (pode ser async; recebe o pedido com signal/onProgress) */
+  researchHandler: ResearchHandler = () => ({ prospects: [], notes: "" });
+  /**
+   * Pesquisa na web falsa, guiada por researchHandler. Respeita o signal como os provedores de
+   * verdade. Para simular uma IA sem pesquisa na web: `ai.research = undefined`.
+   */
+  research?: <T extends z.ZodType>(req: ResearchRequest<T>) => Promise<z.infer<T>> = async (req) => {
+    this.calls.push(req as StructuredRequest<z.ZodType>);
+    const signal = req.signal;
+    if (signal?.aborted) throw new AiError("Pesquisa cancelada.");
+    let onAbort = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new AiError("Pesquisa cancelada."));
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      const out = await Promise.race([Promise.resolve(this.researchHandler(req as ResearchRequest<z.ZodType>)), aborted]);
+      return req.schema.parse(out);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  };
   handlers: Record<AiTask, Handler> = {
     reply: () => ({ reply: "Olá! Como posso te ajudar?", handoff: false, handoffReason: "" }),
     qualify: () => ({
@@ -48,6 +108,31 @@ export class FakeAi implements AiProvider {
     copilot_ask: () => ({ answer: "Pergunte o orçamento.", suggestedMessage: "Qual valor você tinha em mente?" }),
     extract: () => ({ leads: [] }),
     followup: () => ({ send: true, message: "Oi! Conseguiu pensar na proposta?", reason: "" }),
+    prospect: () => ({ prospects: [], notes: "" }),
+    sample_site: () => ({
+      title: "Site demo",
+      html: SAMPLE_HTML,
+      caption: "Oi! Preparei uma prévia de site para vocês, dá uma olhada:",
+      notes: "",
+    }),
+    sample_image: () => ({
+      title: "Arte demo",
+      svg: SAMPLE_SVG,
+      caption: "Oi! Fiz uma arte de exemplo para vocês:",
+      notes: "",
+    }),
+    playbook_assistant: () => ({
+      reply: "Me conta o produto.",
+      draft: {
+        name: "",
+        goal: "",
+        offer: "",
+        instructions: "",
+        handoffRules: "",
+        firstMessage: "",
+      },
+      done: false,
+    }),
   };
 
   async generate<T extends z.ZodType>(req: StructuredRequest<T>): Promise<z.infer<T>> {
@@ -117,6 +202,9 @@ export async function setup(env: Record<string, string> = {}) {
   }) as unknown as typeof fetch;
   const events = new EventBus(async () => ({ url: config.N8N_WEBHOOK_URL }), silent, fakeFetch);
   const ai = new FakeAi();
+  // Claude Code (assinatura) falso: prospecção e amostras. Para "desligado": env.ctx.claude = null
+  const claude = new FakeAi();
+  const publisher = new FakePublisher();
   const wa = new SimulatorProvider();
   // 12:00 em São Paulo (dentro da janela de envio padrão 08:00–20:00)
   let clock = new Date("2026-10-09T15:00:00Z");
@@ -124,6 +212,8 @@ export async function setup(env: Record<string, string> = {}) {
     db: handle.db,
     config,
     ai,
+    claude,
+    publisher,
     wa,
     events,
     jobs: new KeyedRunner((err) => {
@@ -138,6 +228,8 @@ export async function setup(env: Record<string, string> = {}) {
   return {
     ctx,
     ai,
+    claude,
+    publisher,
     wa,
     deliveries,
     errors,

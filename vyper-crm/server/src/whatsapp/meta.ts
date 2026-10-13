@@ -5,6 +5,7 @@ import {
   mediaPlaceholder,
   type ConnectResult,
   type ConnectionStatus,
+  type OutgoingImage,
   type ParsedWebhook,
   type StatusUpdate,
   type WhatsAppProvider,
@@ -43,6 +44,43 @@ export class MetaCloudProvider implements WhatsAppProvider {
         to: phone,
         type: "text",
         text: { preview_url: true, body: text },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const json = (await res.json().catch(() => ({}))) as { messages?: { id: string }[]; error?: { message?: string } };
+    if (!res.ok) throw new Error(`Meta Cloud API → ${res.status}: ${json.error?.message ?? "erro desconhecido"}`);
+    return { externalId: json.messages?.[0]?.id };
+  }
+
+  /** Sobe a imagem (POST /media, multipart) e envia a mensagem com o id dela. */
+  async sendImage(phone: string, image: OutgoingImage): Promise<{ externalId?: string }> {
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("type", image.mimeType);
+    form.append(
+      "file",
+      new Blob([new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength)], { type: image.mimeType }),
+      image.fileName || (image.mimeType === "image/png" ? "imagem.png" : "imagem.jpg"),
+    );
+    const up = await this.fetchImpl(`${this.base}/media`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.opts.accessToken}` },
+      body: form,
+      signal: AbortSignal.timeout(60_000),
+    });
+    const media = (await up.json().catch(() => ({}))) as { id?: string; error?: { message?: string } };
+    if (!up.ok || !media.id) {
+      throw new Error(`Meta Cloud API (envio da imagem) → ${up.status}: ${media.error?.message ?? "erro desconhecido"}`);
+    }
+    const res = await this.fetchImpl(`${this.base}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.accessToken}` },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: phone,
+        type: "image",
+        image: { id: media.id, ...(image.caption ? { caption: image.caption } : {}) },
       }),
       signal: AbortSignal.timeout(30_000),
     });

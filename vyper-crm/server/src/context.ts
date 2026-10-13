@@ -3,6 +3,7 @@ import type { Config } from "./config.js";
 import type { Db } from "./db/client.js";
 import type { EventBus } from "./lib/events.js";
 import type { KeyedRunner } from "./lib/keyed-runner.js";
+import type { SitePublisher } from "./lib/publisher.js";
 import type { WhatsAppProvider } from "./whatsapp/types.js";
 
 export interface Logger {
@@ -16,6 +17,10 @@ export interface AppContext {
   db: Db;
   config: Config;
   ai: AiProvider;
+  /** Claude Code (assinatura) — só prospecção e amostras. null = desligado */
+  claude: AiProvider | null;
+  /** Netlify — null sem NETLIFY_AUTH_TOKEN */
+  publisher: SitePublisher | null;
   wa: WhatsAppProvider;
   events: EventBus;
   jobs: KeyedRunner;

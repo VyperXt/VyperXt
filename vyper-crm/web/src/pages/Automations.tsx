@@ -3,6 +3,7 @@ import { Bot, Clock, MessageSquareText, Pencil, Plus, Trash2, Workflow } from "l
 import { useState } from "react";
 import { Link } from "react-router";
 import { PageHeader } from "../components/Layout";
+import { ScheduledQueue } from "../components/ScheduledQueue";
 import { Badge, Button, Empty, Field, Modal, Spinner, Toggle } from "../components/ui";
 import { api } from "../lib/api";
 import { useErrorToast } from "../lib/app-state";
@@ -37,13 +38,6 @@ export function AutomationsPage() {
   const onError = useErrorToast();
   const [editing, setEditing] = useState<Draft | null>(null);
   const sequences = useQuery({ queryKey: ["sequences"], queryFn: () => api<Sequence[]>("/sequences") });
-  const scheduled = useQuery({
-    queryKey: ["scheduled"],
-    queryFn: () =>
-      api<Array<{ id: number; body: string; sendAt: string; status: string; leadId: number; leadName: string; error: string | null }>>(
-        "/scheduled",
-      ),
-  });
 
   const toggle = useMutation({
     mutationFn: (s: Sequence) => api(`/sequences/${s.id}`, { method: "PATCH", body: { active: !s.active } }),
@@ -68,6 +62,7 @@ export function AutomationsPage() {
         }
       />
       <div className="space-y-4 p-4 md:p-6">
+        <ScheduledQueue />
         <div className="rounded-xl bg-sky-50 p-3 text-sm text-sky-900">
           Os envios respeitam a janela de horário (Configurações → Automação), param quando o lead responde e nunca vão para quem pediu
           para sair. Passos do tipo <b>IA</b> escrevem uma mensagem personalizada a partir da conversa — e podem decidir não enviar se não
@@ -123,29 +118,6 @@ export function AutomationsPage() {
           ))}
         </div>
 
-        <div className="card p-4">
-          <h2 className="mb-3 text-sm font-semibold">Mensagens agendadas</h2>
-          {scheduled.data?.length === 0 && (
-            <p className="text-sm text-slate-500">Nenhuma. Agende pelo botão de relógio na tela de conversa.</p>
-          )}
-          <ul className="divide-y divide-slate-100">
-            {scheduled.data?.map((m) => (
-              <li key={m.id} className="flex items-start justify-between gap-3 py-2 text-sm">
-                <div className="min-w-0">
-                  <Link to={`/conversas/${m.leadId}`} className="font-medium hover:underline">
-                    {m.leadName}
-                  </Link>
-                  <p className="truncate text-slate-600">{m.body}</p>
-                  {m.error && <p className="text-xs text-red-600">{m.error}</p>}
-                </div>
-                <div className="shrink-0 text-right text-xs text-slate-500">
-                  <p>{formatDateTime(m.sendAt)}</p>
-                  <p>{{ pending: "pendente", sent: "enviada", failed: "falhou", canceled: "cancelada" }[m.status] ?? m.status}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
       </div>
       {editing && <SequenceEditor draft={editing} onClose={() => setEditing(null)} />}
     </div>

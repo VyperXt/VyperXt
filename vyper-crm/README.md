@@ -1,13 +1,15 @@
 # Vyper CRM — WhatsApp + IA + n8n
 
-CRM completo para vender pelo WhatsApp, com Inteligência Artificial (Claude, da Anthropic, ou modelos gratuitos pelo OpenRouter) e automações no n8n.
+CRM completo para vender pelo WhatsApp, com Inteligência Artificial (modelos gratuitos pelo OpenRouter ou Claude, da Anthropic), a sua assinatura do Claude (Claude Code) para prospectar clientes e criar amostras, e automações no n8n.
 
 | | |
 |---|---|
-| 💬 **WhatsApp integrado** | Caixa de entrada em tempo real. Conecta qualquer número por QR code (Evolution API) ou pela API oficial da Meta. |
+| 💬 **WhatsApp integrado** | Caixa de entrada em tempo real. Conecta qualquer número por QR code (Evolution API) ou pela API oficial da Meta. **Nova conversa** com qualquer número direto do painel. |
 | 🤖 **Bot de atendimento** | A IA responde os leads sozinha, qualifica (nome, interesse, orçamento, prazo) e **passa para você** quando o lead quer fechar, pede desconto ou pergunta algo que ela não sabe. |
 | 🧭 **Copiloto (direcionador de conversa)** | Quando *você* está conversando, a IA lê cada mensagem do lead e sugere caminhos: próximo passo, objeções, sinais de compra e 2–3 mensagens prontas. **Ela nunca envia nada sozinha** — você escolhe, edita e envia. |
 | 🎯 **Captador de leads com IA** | Cole qualquer texto (lista, DM do Instagram, assinatura de e-mail, anotação) e a IA extrai os contatos. Também capta por formulário, site e n8n. Cada lead recebe nota de 0–100 e temperatura (frio/morno/quente). |
+| 🔎 **Prospecção com IA** | Diga o nicho e a cidade e o Claude (sua assinatura) pesquisa na web empresas com telefone, site e Instagram, com uma abordagem sugerida para cada uma. Você revisa e importa as que quiser — nada é enviado sozinho. |
+| ✨ **Amostras para leads quentes** | Quando um lead fica quente ou é passado para você, o Claude cria um **site demo** (publicado no Netlify) ou uma **arte** (imagem) feita para o negócio dele. Você revisa e envia com 1 clique. |
 | ⏱️ **Envio automático** | Follow-ups automáticos quando o lead para de responder (a IA escreve a mensagem a partir da conversa), boas-vindas para leads de formulário e mensagens agendadas — com janela de horário e opt-out. |
 | 🔗 **n8n** | O CRM avisa o n8n de tudo (lead novo, lead quente, transferência para humano...) e o n8n controla o CRM por API. 4 workflows prontos para importar. |
 | 📊 **Funil e painel** | Kanban com arrastar e soltar, ficha do lead com linha do tempo, painel com conversão, valor em negociação e quem está esperando resposta. |
@@ -21,13 +23,17 @@ CRM completo para vender pelo WhatsApp, com Inteligência Artificial (Claude, da
 3. [Rodar sem Docker (para testar rápido)](#rodar-sem-docker-para-testar-rápido)
 4. [Conectar o WhatsApp](#conectar-o-whatsapp)
 5. [Configurar a IA](#configurar-a-ia)
-6. [O copiloto (direcionador de conversa)](#o-copiloto-direcionador-de-conversa)
-7. [Automações e envio automático](#automações-e-envio-automático)
-8. [Integração com o n8n](#integração-com-o-n8n)
-9. [Boas práticas para não ter o número bloqueado](#boas-práticas-para-não-ter-o-número-bloqueado)
-10. [Colocar em produção (VPS)](#colocar-em-produção-vps)
-11. [Estrutura do projeto e desenvolvimento](#estrutura-do-projeto-e-desenvolvimento)
-12. [Solução de problemas](#solução-de-problemas)
+6. [Claude Code (sua assinatura)](#claude-code-sua-assinatura)
+7. [O copiloto (direcionador de conversa)](#o-copiloto-direcionador-de-conversa)
+8. [Nova conversa](#nova-conversa)
+9. [Prospecção com IA](#prospecção-com-ia)
+10. [Amostras para leads quentes](#amostras-para-leads-quentes)
+11. [Automações e envio automático](#automações-e-envio-automático)
+12. [Integração com o n8n](#integração-com-o-n8n)
+13. [Boas práticas para não ter o número bloqueado](#boas-práticas-para-não-ter-o-número-bloqueado)
+14. [Colocar em produção (VPS)](#colocar-em-produção-vps)
+15. [Estrutura do projeto e desenvolvimento](#estrutura-do-projeto-e-desenvolvimento)
+16. [Solução de problemas](#solução-de-problemas)
 
 ---
 
@@ -49,7 +55,9 @@ flowchart LR
     CRM -- envia --> WA
     CRM <-- eventos / API --> N8N[n8n]
     Voce((Você no<br/>painel)) <--> CRM
-    CRM <--> Claude[IA: Claude<br/>ou OpenRouter]
+    CRM <--> IA[IA do dia a dia:<br/>OpenRouter ou Claude]
+    CRM <--> CC[Claude Code<br/>prospecção e amostras]
+    CRM -- sites demo --> NL[Netlify]
 ```
 
 Cada conversa está em um de dois modos (você troca com um clique na tela de conversa):
@@ -78,7 +86,9 @@ Abra o `.env` e preencha pelo menos:
 |---|---|
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Seu login no painel (senha com pelo menos 8 caracteres) |
 | `JWT_SECRET` | Um segredo longo e aleatório (`openssl rand -hex 32`) |
-| `ANTHROPIC_API_KEY` e/ou `OPENROUTER_API_KEY` | Chave da IA: Claude ([console.anthropic.com](https://console.anthropic.com)) ou OpenRouter, que tem modelos gratuitos ([openrouter.ai/keys](https://openrouter.ai/keys)) |
+| `OPENROUTER_API_KEY` e/ou `ANTHROPIC_API_KEY` | Chave da IA do dia a dia: OpenRouter, que tem modelos gratuitos ([openrouter.ai/keys](https://openrouter.ai/keys)), ou Claude ([console.anthropic.com](https://console.anthropic.com)) |
+| `CLAUDE_CODE_ENABLED` / `CLAUDE_CODE_OAUTH_TOKEN` | Opcional: a sua assinatura do Claude para a prospecção e as amostras — veja [Claude Code](#claude-code-sua-assinatura) |
+| `NETLIFY_AUTH_TOKEN` | Opcional: publica os sites demo das amostras — veja [Amostras](#amostras-para-leads-quentes) |
 | `EVOLUTION_API_KEY` | Uma senha qualquer para a Evolution API |
 | `WEBHOOK_SECRET` | Um token qualquer (protege o webhook do WhatsApp) |
 | `CRM_API_KEY` | Uma chave qualquer — o n8n usa para falar com o CRM |
@@ -112,14 +122,15 @@ Pré-requisito: [Node.js 22+](https://nodejs.org).
 ```bash
 cd vyper-crm
 cp .env.example .env
-# no .env: WHATSAPP_PROVIDER=simulator  e  ANTHROPIC_API_KEY=sua-chave (ou OPENROUTER_API_KEY, grátis)
+# no .env: WHATSAPP_PROVIDER=simulator  e  OPENROUTER_API_KEY=sua-chave (grátis; ou ANTHROPIC_API_KEY)
+# opcional: CLAUDE_CODE_ENABLED=true para a prospecção e as amostras (usa o seu /login do Claude Code)
 npm run setup   # instala as dependências
 npm run dev     # sobe a API (3000) e o painel (5173)
 ```
 
 Abra http://localhost:5173 → **Conversas** → **Simular** (o botão só aparece no modo simulador). Mande uma mensagem como se fosse um cliente e veja o bot responder, a ficha ser preenchida e o copiloto sugerir caminhos. Na conversa, o botão 🧪 envia o texto *como se fosse o lead*.
 
-> Sem chave de IA (`ANTHROPIC_API_KEY` ou `OPENROUTER_API_KEY`) o CRM funciona normalmente (WhatsApp, funil, automações de texto), só os recursos de IA ficam desligados.
+> Sem chave de IA (`OPENROUTER_API_KEY` ou `ANTHROPIC_API_KEY`) o CRM funciona normalmente (WhatsApp, funil, automações de texto), só os recursos de IA ficam desligados.
 
 ---
 
@@ -165,7 +176,8 @@ O CRM funciona com duas fontes de IA, separadas ou juntas:
 | Qualidade | a melhor para vender em português | varia com o modelo gratuito sorteado |
 
 - **Só uma chave**: o CRM usa essa.
-- **As duas**: a de `AI_PROVIDER` é a principal e a outra vira **reserva** — se a principal falhar (limite de uso, fora do ar, resposta fora do formato), a reserva responde. `AI_PROVIDER=auto` (padrão) usa o Claude como principal; `AI_PROVIDER=openrouter` usa o gratuito como principal e o Claude só quando ele falhar (gasta menos).
+- **As duas**: a de `AI_PROVIDER` é a principal e a outra vira **reserva** — se a principal falhar (limite de uso, fora do ar, resposta fora do formato), a reserva responde. `AI_PROVIDER=openrouter` (o do `.env.example`) usa o gratuito como principal e o Claude só quando ele falhar (gasta menos); `AI_PROVIDER=auto` usa o Claude como principal.
+- **Configuração recomendada**: `AI_PROVIDER=openrouter` com `OPENROUTER_API_KEY` para o dia a dia (bot, qualificação, copiloto, captador e follow-ups) e `CLAUDE_CODE_ENABLED=true` para usar a sua assinatura do Claude **só** na [prospecção](#prospecção-com-ia) e nas [amostras](#amostras-para-leads-quentes) (veja [Claude Code](#claude-code-sua-assinatura)).
 - **Modelo do Claude**: `AI_MODEL` (padrão `claude-opus-5-5`, o mais capaz). Para gastar menos, experimente `claude-sonnet-5-5` ou `claude-haiku-5-5` e veja se a qualidade atende.
 - **O que a IA sabe sobre você**: em **Configurações → Empresa** escreva a descrição da empresa, produtos e preços, perguntas frequentes, tom de voz e regras ("nunca dar mais de 10% de desconto"). **Quanto mais completo, melhor** — a IA é instruída a não inventar preços ou condições e a passar para você quando não souber.
 - **Bot e copiloto**: em **Configurações → Bot e Copiloto** você define o que o bot deve descobrir, quando passar para um humano, se as conversas novas começam com a IA ou com você, e o seu objetivo de vendas (o copiloto usa isso para orientar).
@@ -190,6 +202,40 @@ O que saber antes de usar em produção:
 
 ---
 
+## Claude Code (sua assinatura)
+
+Com uma assinatura do Claude (Pro ou Max) dá para usar o **Claude Code** — o Claude pelo terminal — sem chave de API e sem pagar por uso. No CRM ele faz **só duas coisas**: a [prospecção com IA](#prospecção-com-ia) (pesquisa na web) e as [amostras para leads quentes](#amostras-para-leads-quentes). O dia a dia (bot, qualificação, copiloto, captador, follow-ups) continua com a IA principal (OpenRouter), para não gastar o limite do seu plano.
+
+Para ligar, coloque no `.env`:
+
+```env
+CLAUDE_CODE_ENABLED=true
+CLAUDE_CODE_MODEL=sonnet      # opus gasta o limite bem mais rápido; haiku é o mais leve
+```
+
+**Rodando com `npm run dev`** (no seu computador): instale o Claude Code (`npm install -g @anthropic-ai/claude-code`), rode `claude` uma vez e faça `/login` com a sua conta. O CRM usa esse login — não precisa de token.
+
+**Rodando no Docker**: o contêiner não tem o seu login. No seu computador (com o Claude Code instalado), rode:
+
+```bash
+claude setup-token
+```
+
+Copie o token gerado para `CLAUDE_CODE_OAUTH_TOKEN` no `.env` e reconstrua o CRM:
+
+```bash
+docker compose up -d --build crm
+```
+
+O log de inicialização (`docker compose logs crm`) mostra se o Claude Code e o Netlify estão ligados, e **Configurações → Amostras (Claude)** mostra o mesmo no painel.
+
+O que saber:
+- **Limites do plano**: tudo o que o CRM pede ao Claude conta no limite da sua assinatura (a janela de 5 horas e o limite semanal), junto com o que você usa no claude.ai e no Claude Code. Quando o limite acaba, a prospecção ou a amostra falha com a hora em que ele libera (ex.: "Libera às 23h (America/Sao_Paulo)") e você tenta de novo depois. O bot e o copiloto não são afetados.
+- **Modelos**: `CLAUDE_CODE_RESEARCH_MODEL` e `CLAUDE_CODE_SAMPLE_MODEL` trocam o modelo só da prospecção ou só das amostras (vazio = o de `CLAUDE_CODE_MODEL`).
+- **OpenRouter continua sendo a IA principal.** `AI_PROVIDER=claude-code` (a assinatura responde tudo) ainda funciona, mas gasta o limite do plano bem mais rápido e não é o recomendado.
+
+---
+
 ## O copiloto (direcionador de conversa)
 
 Na tela **Conversas**, o painel da direita mostra, para a conversa aberta:
@@ -202,6 +248,58 @@ Na tela **Conversas**, o painel da direita mostra, para a conversa aberta:
 - **Melhorar meu rascunho**: a IA reescreve o que você está digitando
 
 As sugestões se atualizam sozinhas a cada mensagem do lead (inclusive quando você conversa pelo celular). **O copiloto não tem acesso à função de envio** — por construção, ele só sugere.
+
+---
+
+## Nova conversa
+
+Para falar com alguém que ainda não te mandou mensagem: em **Conversas**, clique no ícone de **Nova conversa** (ao lado do título), digite o telefone (com DDD; o 9 é opcional) e, se quiser, o nome.
+
+- Se o número **já é um lead**, o CRM abre a conversa dele.
+- Se não é, cria o lead (com a conversa em **Eu respondo**) e abre a conversa com a caixa de mensagem pronta. Nada é enviado até você mandar a primeira mensagem — só então ela aparece na lista.
+- Com a Evolution, o CRM confere antes se o número tem WhatsApp e avisa se não tiver.
+- Com a API da Meta, lembre da regra das 24h: para quem não te escreveu nas últimas 24h, só *templates* aprovados (o CRM avisa).
+
+---
+
+## Prospecção com IA
+
+Precisa do [Claude Code](#claude-code-sua-assinatura) ligado (`CLAUDE_CODE_ENABLED=true`).
+
+Em **Prospecção** (menu lateral), descreva quem você procura: **nicho** (ex.: clínicas odontológicas), **onde** (bairro, cidade ou região), porte, quantidade (até 25), **o que você quer oferecer** e observações (ex.: "só quem tem Instagram ativo"). O Claude pesquisa na web e devolve, para cada empresa: telefone, site, Instagram, e-mail quando houver, porte, por que ela combina com a sua oferta, uma nota de 0–100, uma **primeira mensagem sugerida** e as **fontes** (os links onde os dados foram encontrados).
+
+- **Leva alguns minutos** (o progresso aparece na tela, com as buscas e páginas lidas). Roda uma pesquisa por vez; você pode sair da tela e o CRM avisa quando terminar.
+- **Você revisa e importa**: marque as empresas que quiser, escolha a etapa do funil e clique em importar. Contatos que já estão no CRM aparecem marcados e não são importados de novo. Os leads importados entram com a conversa em **Eu respondo** e **não** entram na automação de *Lead novo*.
+- **Nada é enviado sozinho.** O botão **Conversar** abre a conversa com a mensagem sugerida no rascunho, para você editar e enviar.
+- **Confira antes de usar**: os dados vêm de páginas públicas e podem estar desatualizados — abra as fontes quando estiver em dúvida.
+- **Google Maps**: o Claude encontra empresas listadas no Google pela busca na web (guias, sites, redes sociais), mas **não navega no Google Maps** — empresas que só existem lá podem ficar de fora.
+
+Boas práticas (LGPD e para não ter o número bloqueado): fale com poucas empresas por vez, com uma mensagem pessoal e relevante para o negócio delas, identifique-se, e respeite quem pedir para não receber mais mensagens (o **opt-out** — `SAIR`, `PARAR` — vale para esses leads também). Não use a prospecção para disparo em massa.
+
+---
+
+## Amostras para leads quentes
+
+Precisa do [Claude Code](#claude-code-sua-assinatura) ligado. Quando um lead **fica quente** ou a IA **passa a conversa para você**, o Claude cria sozinho uma **amostra** do que você vende, feita para o negócio desse lead:
+
+- **Site demo**: uma página completa (no celular e no computador) para a empresa do lead, publicada no Netlify — o lead recebe um link.
+- **Arte**: uma imagem (post, banner, mockup) enviada como foto no WhatsApp (PNG).
+
+O Claude usa o que você escreveu em **Configurações → Empresa** e o que já se sabe do lead (conversa, interesse, anotações). Quando não sabe algo (preço, endereço, depoimentos), usa um conteúdo claramente genérico em vez de inventar.
+
+**Você revisa e envia com 1 clique — nada sai sozinho.** A amostra aparece na conversa do lead (e na ficha dele): **Ver** abre a prévia, **Enviar** abre a mensagem sugerida para você editar (no site, o link é publicado e acrescentado à mensagem), **Refazer** pede outra versão com uma instrução sua ("use as cores azul e branco", "faça uma arte em vez de site") e **Descartar** tira a amostra. Também dá para pedir uma a qualquer momento pelo botão ✨ ao lado da caixa de mensagem. Cada amostra leva de 1 a 5 minutos.
+
+Em **Configurações → Amostras (Claude)** você liga ou desliga a criação automática (quando o lead fica quente e/ou quando é passado para você), escolhe o tipo padrão (site ou arte) e escreve instruções fixas para o Claude (ex.: "sempre mostre o plano mensal", "use a nossa paleta: preto e dourado").
+
+### Publicar os sites no Netlify
+
+A arte funciona sem isso; para o **site demo** o CRM precisa publicar a página:
+
+1. Crie uma conta grátis em [netlify.com](https://www.netlify.com).
+2. Em [app.netlify.com/user/applications](https://app.netlify.com/user/applications) → **Personal access tokens** → **New access token**, gere um token.
+3. No `.env`: `NETLIFY_AUTH_TOKEN=seu-token` e reinicie o CRM.
+
+Na primeira publicação o CRM cria **um** site de demonstrações (`vyper-demos-....netlify.app`) e coloca cada demo num endereço próprio e difícil de adivinhar (`/padaria-bom-pao-3f9a1c27e4/`). Os demos **não aparecem em buscadores** (`robots.txt` bloqueia e cada página tem `noindex`), e a página inicial do site é neutra. Para usar um site que você já criou, coloque o id dele em `NETLIFY_SITE_ID`. Descartar uma amostra publicada tira o demo do ar.
 
 ---
 
@@ -296,9 +394,10 @@ O WhatsApp bloqueia números que mandam mensagens em massa para quem não pediu.
 vyper-crm/
 ├── server/                  # API (Node.js 22 + TypeScript + Fastify + Drizzle ORM)
 │   ├── src/
-│   │   ├── ai/              # Claude: provider, prompts e schemas (bot, qualificação, copiloto, captador, follow-up)
+│   │   ├── ai/              # IA: provedores (OpenRouter, Claude, Claude Code), prompts e schemas
 │   │   ├── whatsapp/        # Provedores: Evolution, Meta Cloud API, simulador
-│   │   ├── services/        # Regras de negócio: mensagens, leads, IA, automações
+│   │   ├── services/        # Regras de negócio: mensagens, leads, IA, automações, prospecção, amostras
+│   │   ├── lib/             # Utilitários (publicação no Netlify, SVG → PNG, eventos...)
 │   │   ├── routes/          # Rotas HTTP (painel, webhooks, API do n8n, eventos em tempo real)
 │   │   ├── db/              # Schema do banco
 │   │   └── settings.ts      # Configurações editáveis pelo painel
@@ -334,7 +433,11 @@ Mudou o schema do banco (`server/src/db/schema.ts`)? Gere a migração com `npm 
 | Mensagens pararam de chegar depois de trocar `WEBHOOK_SECRET` ou `PUBLIC_URL` | O CRM atualiza o webhook da Evolution sozinho ao iniciar. Se a Evolution estava fora do ar nessa hora, clique em **Conectar** em Configurações → WhatsApp. Webhooks recusados aparecem no log como `webhook recusado`. |
 | QR code não aparece | Aguarde alguns segundos (ele chega por webhook). Veja `docker compose logs evolution`. Confira se `EVOLUTION_API_KEY` é a mesma no CRM e na Evolution. |
 | Mensagens do WhatsApp não chegam no CRM | Em **Configurações → WhatsApp**, confira a URL do webhook. No Docker ela deve ser `http://crm:3000/...`. Se o CRM roda fora do Docker, ajuste `PUBLIC_URL` para um endereço que a Evolution alcance. |
-| "IA desativada" | Coloque `ANTHROPIC_API_KEY` ou `OPENROUTER_API_KEY` no `.env` e reinicie (`docker compose up -d crm`). |
+| "IA desativada" | Coloque `OPENROUTER_API_KEY` ou `ANTHROPIC_API_KEY` no `.env` e reinicie (`docker compose up -d crm`). |
+| "A prospecção/As amostras usam o Claude Code" | Ligue `CLAUDE_CODE_ENABLED=true` no `.env` e reinicie. No Docker, também `CLAUDE_CODE_OAUTH_TOKEN` (veja [Claude Code](#claude-code-sua-assinatura)). |
+| "Claude Code não está logado" / token inválido | Sem Docker: rode `claude` e faça `/login`. No Docker: gere outro token com `claude setup-token`, troque `CLAUDE_CODE_OAUTH_TOKEN` e rode `docker compose up -d crm`. |
+| Prospecção ou amostra falhou com "Libera às ..." | O limite do seu plano do Claude acabou (janela de 5 horas ou semanal). Tente de novo depois do horário indicado. |
+| "Configure NETLIFY_AUTH_TOKEN no .env para publicar sites" / "Falha ao publicar no Netlify" | Gere o token em [app.netlify.com/user/applications](https://app.netlify.com/user/applications), coloque em `NETLIFY_AUTH_TOKEN` e reinicie. A arte (imagem) funciona sem o Netlify. |
 | "Limite de uso do OpenRouter atingido" | O plano gratuito permite 50 pedidos por dia (1000 depois de comprar US$ 10 em créditos). Desligue a qualificação automática, compre créditos ou configure também a chave do Claude como reserva. |
 | "Os modelos gratuitos do OpenRouter exigem liberar..." | Em [openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy), permita os provedores gratuitos que podem guardar e treinar com as conversas. |
 | "...provedores gratuitos que podem PUBLICAR as conversas" | O modelo fixado em `OPENROUTER_MODEL` só tem provedores que publicam as conversas. Não libere isso: volte para `openrouter/free`, escolha outro modelo ou use um pago. |

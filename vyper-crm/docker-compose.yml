@@ -112,9 +112,14 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-http://crm:3000}
       EVOLUTION_API_URL: http://evolution:8080
       N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/crm-eventos}
+    volumes:
+      # Estado do Claude Code (CLAUDE_CODE_ENABLED=true ou AI_PROVIDER=claude-code). O login vem de
+      # CLAUDE_CODE_OAUTH_TOKEN no .env.
+      - claude_home:/home/node/.claude
 
 volumes:
   pgdata:
   redisdata:
   evolution_instances:
   n8ndata:
+  claude_home:

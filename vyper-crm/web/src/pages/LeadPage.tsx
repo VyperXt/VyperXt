@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Bot, MessageCircle, Sparkles, StopCircle, Trash2, Workflow, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
+import { SampleList } from "../components/SamplePanel";
 import { Avatar, Badge, Button, Empty, Field, Spinner, TemperatureBadge } from "../components/ui";
 import { api } from "../lib/api";
-import { useErrorToast, useStages, useToast } from "../lib/app-state";
+import { useErrorToast, usePlaybooks, useStages, useToast } from "../lib/app-state";
 import { formatDateTime, formatPhone, leadName, parseBRL, SOURCE_LABEL, toBRLInput } from "../lib/format";
 import type { Lead, LeadDetail, Sequence } from "../lib/types";
 
@@ -40,6 +41,7 @@ export function LeadPage() {
   const toast = useToast();
   const onError = useErrorToast();
   const stages = useStages();
+  const playbooks = usePlaybooks();
   const q = useQuery({ queryKey: ["lead", id], queryFn: () => api<LeadDetail>(`/leads/${id}`) });
   const sequences = useQuery({ queryKey: ["sequences"], queryFn: () => api<Sequence[]>("/sequences") });
   // Só guarda o que a pessoa editou; o resto vem sempre do lead mais recente
@@ -52,7 +54,11 @@ export function LeadPage() {
   const lead = q.data?.lead;
   useEffect(() => setEdits({}), [id]);
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["lead", id] });
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["lead", id] });
+    qc.invalidateQueries({ queryKey: ["leads"] });
+    qc.invalidateQueries({ queryKey: ["playbooks"] });
+  };
   // Controles rápidos (etapa, modo, temperatura, etiquetas): não mexem no que está sendo digitado
   const patch = useMutation({
     mutationFn: (body: Record<string, unknown>) => api<Lead>(`/leads/${id}`, { method: "PATCH", body }),
@@ -147,6 +153,11 @@ export function LeadPage() {
             {formatPhone(lead.phone) || (lead.waJid && "WhatsApp sem número (LID)")}
             <TemperatureBadge value={lead.temperature} score={lead.score} />
             <Badge className="bg-slate-100 text-slate-600">{SOURCE_LABEL[lead.source] ?? lead.source}</Badge>
+            {lead.playbookId && (
+              <Badge className="bg-violet-50 text-violet-700 ring-1 ring-violet-200">
+                {playbooks.data?.find((p) => p.id === lead.playbookId)?.name ?? `Roteiro #${lead.playbookId}`}
+              </Badge>
+            )}
             {lead.optedOut && <Badge className="bg-amber-100 text-amber-800">Não quer automações</Badge>}
           </div>
         </div>
@@ -267,6 +278,23 @@ export function LeadPage() {
                 ))}
               </select>
             </Field>
+            <Field label="Roteiro">
+              <select
+                className="input"
+                value={lead.playbookId ?? ""}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  patch.mutate({ playbookId: val ? Number(val) : null });
+                }}
+              >
+                <option value="">Nenhum roteiro</option>
+                {playbooks.data?.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <Field label="Quem responde no WhatsApp">
               <select className="input" value={lead.chatMode} onChange={(e) => patch.mutate({ chatMode: e.target.value })}>
                 <option value="bot">IA responde sozinha</option>
@@ -308,6 +336,8 @@ export function LeadPage() {
               </Button>
             )}
           </div>
+
+          <SampleList lead={lead} />
 
           <div className="card p-4">
             <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold">

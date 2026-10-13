@@ -72,4 +72,8 @@ export const SOURCE_LABEL: Record<string, string> = {
   formulario: "Formulário",
   importacao: "Importação",
   "captador-ia": "Captador IA",
+  "prospeccao-ia": "Prospecção IA",
 };
+
+/** Erro gravado pelo servidor quando o envio falha porque o número não tem WhatsApp (igual ao do servidor). */
+export const NOT_ON_WHATSAPP_ERROR = "Este número não tem WhatsApp (conferido com e sem o 9).";

@@ -10,6 +10,7 @@ import { LeadPage } from "./pages/LeadPage";
 import { LeadsPage } from "./pages/Leads";
 import { LoginPage } from "./pages/Login";
 import { PipelinePage } from "./pages/Pipeline";
+import { ProspectingPage } from "./pages/Prospecting";
 import { SettingsPage } from "./pages/Settings";
 
 function Private({ children }: { children: ReactNode }) {
@@ -36,6 +37,7 @@ export function App() {
           <Route path="funil" element={<PipelinePage />} />
           <Route path="leads" element={<LeadsPage />} />
           <Route path="leads/:id" element={<LeadPage />} />
+          <Route path="prospeccao" element={<ProspectingPage />} />
           <Route path="automacoes" element={<AutomationsPage />} />
           <Route path="configuracoes" element={<SettingsPage />} />
         </Route>

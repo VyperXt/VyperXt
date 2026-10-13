@@ -1,16 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Copy, Plus, QrCode, RefreshCw, Save, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, Copy, Plus, QrCode, RefreshCw, Save, Sparkles, Trash2, XCircle } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { PageHeader } from "../components/Layout";
-import { Button, Field, Spinner, Toggle } from "../components/ui";
+import { PlaybookAssistant } from "../components/PlaybookAssistant";
+import { Badge, Button, Empty, Field, Modal, Spinner, Toggle } from "../components/ui";
 import { api, setToken } from "../lib/api";
 import { useErrorToast, useMe, useRealtime, useSettings, useStages, useToast } from "../lib/app-state";
-import type { Settings, Stage, User } from "../lib/types";
+import type { Playbook, Settings, SettingsResponse, Stage, User } from "../lib/types";
 
 const TABS = [
   { id: "empresa", label: "Empresa (base da IA)" },
   { id: "bot", label: "Bot e Copiloto" },
+  { id: "roteiros", label: "Roteiros" },
   { id: "automacao", label: "Automação" },
+  { id: "amostras", label: "Amostras (Claude)" },
   { id: "whatsapp", label: "WhatsApp" },
   { id: "n8n", label: "n8n e API" },
   { id: "funil", label: "Funil" },
@@ -18,6 +21,13 @@ const TABS = [
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+const AI_PROVIDER_LABEL: Record<SettingsResponse["system"]["aiProvider"], string> = {
+  "claude-code": "Claude Code (sua assinatura)",
+  anthropic: "Claude (API da Anthropic)",
+  openrouter: "OpenRouter",
+  none: "IA desativada",
+};
 
 export function SettingsPage() {
   const [tab, setTab] = useState<TabId>("empresa");
@@ -30,13 +40,21 @@ export function SettingsPage() {
   const [kwText, setKwText] = useState<string | null>(null);
 
   useEffect(() => {
-    if (q.data && !s) setS(q.data.settings);
+    if (q.data && !s) {
+      setS({
+        ...q.data.settings,
+        notify: q.data.settings.notify ?? { handoffEnabled: false, handoffPhone: "" },
+      });
+    }
   }, [q.data, s]);
 
   const save = useMutation({
     mutationFn: () => api<{ settings: Settings }>("/settings", { method: "PUT", body: s }),
     onSuccess: (r) => {
-      setS(r.settings);
+      setS({
+        ...r.settings,
+        notify: r.settings.notify ?? { handoffEnabled: false, handoffPhone: "" },
+      });
       setKwText(null);
       qc.invalidateQueries({ queryKey: ["settings"] });
       toast({ kind: "success", text: "Configurações salvas." });
@@ -44,11 +62,26 @@ export function SettingsPage() {
     onError,
   });
 
+  const testNotify = useMutation({
+    mutationFn: async () => {
+      if (dirty) {
+        await api<{ settings: Settings }>("/settings", { method: "PUT", body: s });
+        qc.invalidateQueries({ queryKey: ["settings"] });
+      }
+      return api<{ ok: boolean }>("/settings/notify/test", { method: "POST" });
+    },
+    onSuccess: () => {
+      toast({ kind: "success", text: "Mensagem de teste de aviso enviada!" });
+    },
+    onError,
+  });
+
   if (!q.data || !s) return <div className="grid h-full place-items-center"><Spinner /></div>;
   const sys = q.data.system;
   const dirty = JSON.stringify(s) !== JSON.stringify(q.data.settings);
-  const up = <K extends keyof Settings>(k: K, patch: Partial<Settings[K]>) => setS({ ...s, [k]: { ...s[k], ...patch } });
-  const showSave = ["empresa", "bot", "automacao", "n8n"].includes(tab);
+  const up = <K extends keyof Settings>(k: K, patch: Partial<Settings[K]>) =>
+    setS({ ...s, [k]: { ...((s[k] ?? {}) as any), ...patch } });
+  const showSave = ["empresa", "bot", "automacao", "amostras", "n8n"].includes(tab);
 
   return (
     <div className="flex h-full flex-col">
@@ -129,11 +162,65 @@ export function SettingsPage() {
                 <Toggle checked={s.ai.autoQualify} onChange={(v) => up("ai", { autoQualify: v })} label="A IA atualiza nota, temperatura, interesse e resumo a cada mensagem" />
                 <Toggle checked={s.ai.autoMoveStage} onChange={(v) => up("ai", { autoMoveStage: v })} label="A IA pode avançar o lead no funil (nunca para Ganho/Perdido)" />
                 <p className="text-xs text-slate-500">
-                  Modelo: <code>{sys.aiModel || "IA desativada"}</code> (mude no .env: AI_MODEL para o Claude, OPENROUTER_MODEL para o OpenRouter)
+                  IA do dia a dia (bot, qualificação, copiloto e follow-ups):{" "}
+                  <strong className="font-medium text-slate-700">{AI_PROVIDER_LABEL[sys.aiProvider] ?? AI_PROVIDER_LABEL.none}</strong>
+                  {sys.aiModel && (
+                    <>
+                      {" "}— modelo <code>{sys.aiModel}</code>
+                    </>
+                  )}
+                  . Mude no .env: AI_PROVIDER e OPENROUTER_MODEL (recomendado: OpenRouter) ou AI_MODEL para o Claude (API).
                 </p>
+                <p className="text-xs text-slate-500">
+                  Claude Code (sua assinatura), só para prospecção e amostras:{" "}
+                  {sys.claudeCode?.enabled ? (
+                    <>
+                      ligado{sys.claudeCode.model && <> — <code>{sys.claudeCode.model}</code></>}.
+                    </>
+                  ) : (
+                    <>
+                      desligado — defina <code>CLAUDE_CODE_ENABLED=true</code> no .env.
+                    </>
+                  )}{" "}
+                  Pesquisa na web (prospecção): {sys.aiResearch ? "disponível." : "indisponível."}
+                </p>
+              </Card>
+              <Card
+                title="Aviso quando a IA passar para você"
+                desc="Notificação enviada direto no seu WhatsApp quando a IA transferir um atendimento para um humano."
+              >
+                <Toggle
+                  checked={s.notify.handoffEnabled}
+                  onChange={(v) => up("notify", { handoffEnabled: v })}
+                  label="Avisar no meu WhatsApp quando a IA passar um lead"
+                />
+                <Field
+                  label="Telefone para receber o aviso"
+                  hint="Apenas dígitos com DDD e DDI (ex.: 5511999998888). Este número nunca virará lead no CRM."
+                >
+                  <div className="flex gap-2">
+                    <input
+                      className="input flex-1"
+                      placeholder="5511999998888"
+                      value={s.notify.handoffPhone}
+                      onChange={(e) => up("notify", { handoffPhone: e.target.value })}
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      loading={testNotify.isPending}
+                      disabled={!s.notify.handoffPhone.trim()}
+                      onClick={() => testNotify.mutate()}
+                    >
+                      Enviar teste
+                    </Button>
+                  </div>
+                </Field>
               </Card>
             </>
           )}
+
+          {tab === "roteiros" && <PlaybooksTab />}
 
           {tab === "automacao" && (
             <>
@@ -164,6 +251,8 @@ export function SettingsPage() {
               </Card>
             </>
           )}
+
+          {tab === "amostras" && <SamplesTab s={s.samples} sys={sys} onChange={(patch) => up("samples", patch)} />}
 
           {tab === "whatsapp" && <WhatsAppTab provider={sys.whatsappProvider} webhooks={sys.webhooks} />}
 
@@ -199,6 +288,95 @@ POST /api/integrations/leads/:id/qualify    roda a qualificação com IA`}</pre>
         </div>
       </div>
     </div>
+  );
+}
+
+function StatusLine({ ok, children }: { ok: boolean; children: ReactNode }) {
+  return (
+    <div className="flex items-start gap-2 text-sm">
+      {ok ? <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-brand-600" /> : <XCircle className="mt-0.5 size-4 shrink-0 text-slate-400" />}
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+function SamplesTab({
+  s,
+  sys,
+  onChange,
+}: {
+  s: Settings["samples"];
+  sys: SettingsResponse["system"];
+  onChange: (patch: Partial<Settings["samples"]>) => void;
+}) {
+  const claude = sys.claudeCode?.enabled ?? false;
+  return (
+    <>
+      <Card
+        title="Amostras com Claude"
+        desc="Quando um lead esquenta, o Claude cria uma amostra do que você entregaria para ele — um site demo (com link) ou uma arte (imagem). Ela aparece na conversa para você revisar e enviar com 1 clique: nada sai sem você."
+      >
+        <StatusLine ok={claude}>
+          {claude ? (
+            <>
+              Claude Code ligado{sys.claudeCode.model && <> — modelo <code>{sys.claudeCode.model}</code></>}. Cada amostra leva alguns minutos e
+              usa o limite da sua assinatura.
+            </>
+          ) : (
+            <>
+              <span className="font-medium">Claude Code desligado.</span>{" "}
+              <span className="text-slate-500">
+                Defina <code>CLAUDE_CODE_ENABLED=true</code> no .env e reinicie o CRM (no computador, faça login com <code>claude</code> e /login; no
+                Docker, gere um token com <code>claude setup-token</code> e coloque em <code>CLAUDE_CODE_OAUTH_TOKEN</code>).
+              </span>
+            </>
+          )}
+        </StatusLine>
+        <StatusLine ok={sys.publisher === "netlify"}>
+          {sys.publisher === "netlify" ? (
+            "Netlify conectado: os sites demo são publicados num link próprio (fora do Google)."
+          ) : (
+            <>
+              <span className="font-medium">Netlify não configurado.</span>{" "}
+              <span className="text-slate-500">
+                Crie um token em app.netlify.com/user/applications (Personal access tokens) e coloque em <code>NETLIFY_AUTH_TOKEN</code> no .env.
+                Sem ele, as artes funcionam, mas o link do site demo não pode ser enviado.
+              </span>
+            </>
+          )}
+        </StatusLine>
+      </Card>
+      <Card title="Quando criar">
+        <Toggle checked={s.autoGenerate} onChange={(v) => onChange({ autoGenerate: v })} label="Criar a amostra sozinho (você só revisa e envia)" />
+        <div className={`space-y-2 border-l-2 border-slate-100 pl-4 ${s.autoGenerate ? "" : "pointer-events-none opacity-50"}`}>
+          <Toggle checked={s.onHot} onChange={(v) => onChange({ onHot: v })} label="Quando a IA marcar o lead como quente" />
+          <Toggle checked={s.onHandoff} onChange={(v) => onChange({ onHandoff: v })} label="Quando a IA passar a conversa para você" />
+        </div>
+        <p className="text-xs text-slate-500">
+          Só uma amostra automática por lead, e nunca para quem pediu para sair. Na conversa, o botão <Sparkles className="inline size-3.5 text-violet-600" /> ao lado da caixa de mensagem cria uma quando você quiser.
+        </p>
+      </Card>
+      <Card title="Como criar">
+        <Field label="Tipo padrão">
+          <select className="input" value={s.defaultKind} onChange={(e) => onChange({ defaultKind: e.target.value as Settings["samples"]["defaultKind"] })}>
+            <option value="site">Site demo (link publicado no Netlify)</option>
+            <option value="image">Arte (imagem enviada pelo WhatsApp)</option>
+          </select>
+        </Field>
+        <Field
+          label="Orientações para o Claude"
+          hint="Valem para todas as amostras, junto com os dados da aba Empresa e a conversa com o lead."
+        >
+          <textarea
+            className="input"
+            rows={4}
+            value={s.instructions}
+            onChange={(e) => onChange({ instructions: e.target.value })}
+            placeholder={"Ex.: visual moderno e minimalista; sempre um botão de WhatsApp em destaque;\nartes no formato de post do Instagram, com pouco texto."}
+          />
+        </Field>
+      </Card>
+    </>
   );
 }
 
@@ -496,3 +674,309 @@ function TeamTab() {
     </>
   );
 }
+
+function PlaybooksTab() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const onError = useErrorToast();
+  const playbooks = useQuery({
+    queryKey: ["playbooks"],
+    queryFn: () => api<Playbook[]>("/playbooks"),
+  });
+  const [editing, setEditing] = useState<Playbook | "new" | null>(null);
+  const [deleting, setDeleting] = useState<Playbook | null>(null);
+  // Assistente de IA: "new" = criar um roteiro do zero conversando
+  const [assisting, setAssisting] = useState<Playbook | "new" | null>(null);
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["playbooks"] });
+    qc.invalidateQueries({ queryKey: ["leads"] });
+  };
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => api<{ ok: boolean }>(`/playbooks/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      refresh();
+      setDeleting(null);
+      toast({ kind: "success", text: "Roteiro excluído." });
+    },
+    onError,
+  });
+
+  return (
+    <>
+      <Card
+        title="Roteiros de atendimento (Playbooks)"
+        desc="Presets com objetivo, oferta e instruções específicas para grupos de leads (ex.: eletricistas, advogados, dentistas)."
+      >
+        <div className="flex items-center justify-between pb-1">
+          <p className="text-xs text-slate-500">
+            {playbooks.data ? `${playbooks.data.length} roteiro(s) cadastrado(s)` : "Carregando..."}
+          </p>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" icon={<Plus className="size-4" />} onClick={() => setEditing("new")}>
+              Novo roteiro
+            </Button>
+            <Button size="sm" icon={<Sparkles className="size-4" />} onClick={() => setAssisting("new")}>
+              Criar com IA
+            </Button>
+          </div>
+        </div>
+
+        {playbooks.isLoading && <Spinner className="m-4" />}
+        {playbooks.data?.length === 0 && (
+          <Empty title="Nenhum roteiro cadastrado">
+            Crie roteiros para conduzir as conversas da IA com abordagens específicas (ex.: nichos, produtos ou campanhas).
+          </Empty>
+        )}
+
+        <div className="space-y-3">
+          {playbooks.data?.map((p) => (
+            <div
+              key={p.id}
+              className="rounded-lg border border-slate-200 bg-white p-4 transition hover:border-slate-300"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-semibold text-slate-900">{p.name}</h3>
+                    <Badge className="bg-violet-50 text-violet-700 ring-1 ring-violet-200">
+                      {p.leadCount} lead(s)
+                    </Badge>
+                  </div>
+                  {p.goal && (
+                    <p className="mt-1 text-sm text-slate-600">
+                      <span className="font-medium text-slate-700">Objetivo:</span> {p.goal}
+                    </p>
+                  )}
+                  {p.offer && (
+                    <p className="mt-0.5 text-xs text-slate-500 line-clamp-2">
+                      <span className="font-medium text-slate-600">Oferta:</span> {p.offer}
+                    </p>
+                  )}
+                  {p.firstMessage && (
+                    <p className="mt-1 text-xs text-slate-400 italic line-clamp-1">
+                      1ª mensagem: “{p.firstMessage}”
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon={<Sparkles className="size-3.5 text-violet-600" />}
+                    onClick={() => setAssisting(p)}
+                  >
+                    Ajustar com IA
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => setEditing(p)}>
+                    Editar
+                  </Button>
+                  <button
+                    className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 transition"
+                    onClick={() => setDeleting(p)}
+                    aria-label={`Excluir roteiro ${p.name}`}
+                    title="Excluir roteiro"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {editing && (
+        <PlaybookModal
+          open={Boolean(editing)}
+          playbook={editing === "new" ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            refresh();
+            setEditing(null);
+          }}
+        />
+      )}
+
+      {assisting && (
+        <PlaybookAssistant
+          playbook={assisting === "new" ? null : assisting}
+          onClose={() => setAssisting(null)}
+          onSaved={() => {
+            refresh();
+            setAssisting(null);
+          }}
+        />
+      )}
+
+      {deleting && (
+        <Modal open={Boolean(deleting)} onClose={() => setDeleting(null)} title="Excluir roteiro">
+          <p className="text-sm text-slate-600">
+            Tem certeza que deseja excluir o roteiro <strong className="font-semibold text-slate-900">{deleting.name}</strong>?
+          </p>
+          <p className="mt-2 text-xs text-slate-500">
+            Os {deleting.leadCount} lead(s) associados a este roteiro continuarão existindo no CRM, mas ficarão sem roteiro.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setDeleting(null)}>
+              Cancelar
+            </Button>
+            <Button
+              variant="danger"
+              loading={deleteMut.isPending}
+              onClick={() => deleteMut.mutate(deleting.id)}
+            >
+              Excluir roteiro
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function PlaybookModal({
+  open,
+  playbook,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  playbook: Playbook | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const onError = useErrorToast();
+  const [f, setF] = useState({
+    name: playbook?.name ?? "",
+    goal: playbook?.goal ?? "",
+    offer: playbook?.offer ?? "",
+    instructions: playbook?.instructions ?? "",
+    handoffRules: playbook?.handoffRules ?? "",
+    firstMessage: playbook?.firstMessage ?? "",
+  });
+
+  const save = useMutation({
+    mutationFn: () => {
+      const body = {
+        name: f.name.trim(),
+        goal: f.goal.trim(),
+        offer: f.offer.trim(),
+        instructions: f.instructions.trim(),
+        handoffRules: f.handoffRules.trim(),
+        firstMessage: f.firstMessage.trim(),
+      };
+      if (playbook) {
+        return api<Playbook>(`/playbooks/${playbook.id}`, { method: "PATCH", body });
+      }
+      return api<Playbook>("/playbooks", { body });
+    },
+    onSuccess: () => {
+      toast({ kind: "success", text: playbook ? "Roteiro atualizado." : "Roteiro criado com sucesso." });
+      onSaved();
+    },
+    onError,
+  });
+
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+    setF({ ...f, [k]: e.target.value });
+
+  return (
+    <Modal open={open} onClose={onClose} title={playbook ? "Editar roteiro" : "Novo roteiro"} wide>
+      <form
+        className="space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (f.name.trim()) save.mutate();
+        }}
+      >
+        <Field label="Nome do roteiro *" hint="Identificação rápida (máx. 80 caracteres)">
+          <input
+            className="input"
+            maxLength={80}
+            placeholder="Ex.: Eletricistas — OrcaEasy"
+            value={f.name}
+            onChange={set("name")}
+            required
+            autoFocus
+          />
+        </Field>
+
+        <Field label="Objetivo da conversa" hint="O que a IA deve conseguir nesta conversa">
+          <textarea
+            className="input"
+            rows={2}
+            placeholder="Ex.: Fazer o eletricista criar conta grátis no OrcaEasy (orcaeasy.com) e testar o envio de orçamento pelo WhatsApp."
+            value={f.goal}
+            onChange={set("goal")}
+          />
+        </Field>
+
+        <Field label="O que você oferece" hint="Benefícios do produto/serviço, preços, diferenciais e links">
+          <textarea
+            className="input"
+            rows={3}
+            placeholder="Ex.: Aplicativo OrcaEasy (orcaeasy.com) para eletricistas montarem e enviarem orçamentos em PDF no WhatsApp em 2 minutos. Plano grátis para começar."
+            value={f.offer}
+            onChange={set("offer")}
+          />
+        </Field>
+
+        <Field
+          label="Como a IA deve conduzir (instruções)"
+          hint="Tom de voz, perguntas de abertura, objeções comuns e respostas, argumentos"
+        >
+          <textarea
+            className="input"
+            rows={7}
+            placeholder={`Ex.: Conduza a conversa de forma direta, simples e profissional.
+Pergunte como ele costuma passar orçamento hoje para os clientes.
+Destaque que com o OrcaEasy ele não perde tempo calculando na mão e passa muito mais confiança com um PDF profissional.
+Se o lead disser que não tem tempo ou é complicado, reforce que leva menos de 2 minutos pelo celular.
+Se perguntar de preço, informe que o cadastro e o teste são 100% gratuitos.`}
+            value={f.instructions}
+            onChange={set("instructions")}
+          />
+        </Field>
+
+        <Field
+          label="Quando passar para você (opcional)"
+          hint="Regras específicas de handoff para este roteiro. Se vazio, usa a regra geral do Bot."
+        >
+          <textarea
+            className="input"
+            rows={2}
+            placeholder="Ex.: Se o eletricista pedir demonstração ao vivo, falar sobre parcerias ou relatar erro no cadastro."
+            value={f.handoffRules}
+            onChange={set("handoffRules")}
+          />
+        </Field>
+
+        <Field
+          label="Primeira mensagem (modelo de abordagem)"
+          hint="Modelo padrão para disparos em massa. Variáveis disponíveis: {nome}, {primeiro_nome}, {empresa}"
+        >
+          <textarea
+            className="input"
+            rows={3}
+            placeholder="Ex.: Olá, {primeiro_nome}! Vi seu trabalho como eletricista e queria te apresentar o OrcaEasy (orcaeasy.com), um app rápido para montar e enviar orçamentos pelo WhatsApp. Quer dar uma olhada?"
+            value={f.firstMessage}
+            onChange={set("firstMessage")}
+          />
+        </Field>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" loading={save.isPending} disabled={!f.name.trim()}>
+            {playbook ? "Salvar alterações" : "Criar roteiro"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+

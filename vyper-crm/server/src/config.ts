@@ -34,12 +34,16 @@ const envSchema = z.object({
 
   // IA: Claude (Anthropic) e/ou OpenRouter (modelos gratuitos). Com as duas chaves, AI_PROVIDER escolhe a
   // principal e a outra fica de reserva. auto = Claude se tiver a chave, senão OpenRouter.
+  // claude-code = usa a sua assinatura do Claude (Pro/Max) pelo Claude Code instalado no computador/contêiner,
+  // sem chave de API; só vale se escolhido explicitamente (o auto nunca escolhe).
   AI_PROVIDER: z.preprocess(
     (v) => {
       const s = typeof v === "string" ? v.trim().toLowerCase() : "";
-      return s === "claude" ? "anthropic" : s || "auto";
+      if (s === "claude") return "anthropic";
+      if (s === "claudecode" || s === "claude_code" || s === "assinatura") return "claude-code";
+      return s || "auto";
     },
-    z.enum(["auto", "anthropic", "openrouter"]),
+    z.enum(["auto", "anthropic", "openrouter", "claude-code"]),
   ),
   ANTHROPIC_API_KEY: z.string().default(""),
   AI_MODEL: z.string().default("claude-opus-5-5"),
@@ -49,6 +53,33 @@ const envSchema = z.object({
   OPENROUTER_MODEL: z.preprocess((v) => (typeof v === "string" && v.trim() ? v.trim() : undefined), z.string().default("openrouter/free")),
   // Outros modelos (separados por vírgula) que o OpenRouter tenta se o principal falhar
   OPENROUTER_FALLBACK_MODELS: z.string().default(""),
+  // Claude Code (a sua assinatura do Claude, sem chave de API). Recomendado: AI_PROVIDER=openrouter para o dia
+  // a dia e CLAUDE_CODE_ENABLED=true para a prospecção com IA e as amostras (site demo / arte) dos leads quentes.
+  CLAUDE_CODE_ENABLED: z.preprocess(
+    (v) => (typeof v === "string" ? ["true", "1", "yes", "sim", "on"].includes(v.trim().toLowerCase()) : v),
+    z.boolean().default(false),
+  ),
+  // Modelo por alias (sonnet, opus, haiku) ou nome completo.
+  // sonnet é o padrão: no plano Pro, o opus gasta o limite de uso bem mais rápido.
+  CLAUDE_CODE_MODEL: z.preprocess((v) => (typeof v === "string" && v.trim() ? v.trim() : undefined), z.string().default("sonnet")),
+  // Modelo da prospecção na web (vazio = o mesmo de CLAUDE_CODE_MODEL)
+  CLAUDE_CODE_RESEARCH_MODEL: z.string().trim().default(""),
+  // Modelo das amostras — site demo e arte (vazio = o mesmo de CLAUDE_CODE_MODEL)
+  CLAUDE_CODE_SAMPLE_MODEL: z.string().trim().default(""),
+  // Caminho do executável (vazio = procura sozinho; no Windows aponte para o claude.exe, não o claude.cmd)
+  CLAUDE_CODE_PATH: z.string().trim().default(""),
+  CLAUDE_CODE_TIMEOUT_MS: z.coerce.number().int().positive().default(180_000),
+  // Quantas respostas da IA podem rodar ao mesmo tempo (a prospecção tem uma vaga própria)
+  CLAUDE_CODE_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(2),
+  // Token da assinatura para o Docker (gere com "claude setup-token" no seu computador). Só é repassado
+  // ao Claude Code; nunca vai para logs.
+  CLAUDE_CODE_OAUTH_TOKEN: z.string().trim().default(""),
+
+  // Netlify: publica os sites demo das amostras (o lead recebe um link). Vazio = não publica.
+  // Gere o token em app.netlify.com/user/applications (Personal access tokens). Nunca vai para logs.
+  NETLIFY_AUTH_TOKEN: z.string().trim().default(""),
+  // Site onde os demos ficam (vazio = o CRM cria um "vyper-demos-..." e guarda no banco)
+  NETLIFY_SITE_ID: z.string().trim().default(""),
 
   // Para onde o CRM envia eventos (lead.created, message.received...) — normalmente um Webhook do n8n
   N8N_WEBHOOK_URL: z.string().default(""),
