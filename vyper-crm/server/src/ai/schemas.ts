@@ -86,6 +86,7 @@ export const prospectSchema = z.object({
         email: z.string().describe("E-mail comercial encontrado na fonte. Vazio se não achar."),
         website: z.string().describe("Site oficial (URL completa). Vazio se não houver."),
         instagram: z.string().describe("Perfil do Instagram (URL ou @usuario). Vazio se não houver."),
+        bioLink: z.string().default("").describe("Link que aparece na bio do Instagram (URL exata), ou vazio se não houver."),
         address: z.string().describe("Endereço como aparece na fonte. Vazio se não souber."),
         city: z.string().describe("Cidade (e UF, se souber)."),
         size: z.string().describe("Porte estimado (ex.: MEI, pequena, média, grande) e por quê, em poucas palavras."),

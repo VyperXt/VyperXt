@@ -5,6 +5,7 @@ import { prospectPrompt, prospectSystem } from "../ai/prompts.js";
 import { prospectSchema, type ProspectOutput } from "../ai/schemas.js";
 import type { AppContext } from "../context.js";
 import {
+  leads,
   prospectSearches,
   type Lead,
   type ProspectCriteria,
@@ -22,6 +23,8 @@ export type { ProspectCriteria, ProspectResult, ProspectSearch, ProspectWhatsApp
 /** Origem dos leads importados da prospecção (as automações de "lead criado" ignoram essa origem). */
 export const PROSPECT_SOURCE = "prospeccao-ia";
 
+export const MAX_PROSPECT_ROUNDS = 3;
+
 /**
  * Quem faz a pesquisa na web: o Claude Code (assinatura, ctx.claude) e, sem ele, a IA principal se ela pesquisar
  * (ex.: ANTHROPIC_API_KEY). null = ninguém pesquisa.
@@ -38,7 +41,64 @@ export const prospectCriteriaSchema = z.object({
   offer: z.string().trim().max(1000).default(""),
   quantity: z.number().int().min(1).max(25).default(10),
   extra: z.string().trim().max(1000).default(""),
+  excludeWithWebsite: z.boolean().default(false),
+  requireWhatsapp: z.boolean().default(false),
+  requireInstagram: z.boolean().default(false),
 });
+
+/** Verifica se a URL é exclusivamente de rede social (Instagram, Facebook) ou WhatsApp. */
+export function isAllowedSocialOrWhatsappLink(urlStr: string): boolean {
+  const trimmed = urlStr.trim();
+  if (!trimmed) return true;
+  let parsedUrl: URL;
+  try {
+    const candidate = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed.replace(/^\/+/, "")}`;
+    parsedUrl = new URL(candidate);
+  } catch {
+    return false;
+  }
+  const host = parsedUrl.hostname.toLowerCase();
+  if (host === "wa.me" || host.endsWith(".wa.me")) return true;
+  if (host === "whatsapp.com" || host.endsWith(".whatsapp.com")) return true;
+  if (host === "instagram.com" || host.endsWith(".instagram.com")) return true;
+  if (host === "instagr.am" || host.endsWith(".instagr.am")) return true;
+  if (host === "facebook.com" || host.endsWith(".facebook.com")) return true;
+  if (host === "fb.com" || host.endsWith(".fb.com")) return true;
+  if (host === "fb.me" || host.endsWith(".fb.me")) return true;
+  return false;
+}
+
+/** Aplica os filtros rígidos do usuário sobre o resultado da prospecção. */
+export function passesHardFilters(p: ProspectResult, c: ProspectCriteria): boolean {
+  if (c.excludeWithWebsite) {
+    if (p.website && !isAllowedSocialOrWhatsappLink(p.website)) return false;
+    if (p.bioLink && !isAllowedSocialOrWhatsappLink(p.bioLink)) return false;
+  }
+  if (c.requireWhatsapp) {
+    if (!p.phone || !p.isMobile) return false;
+    if (p.whatsapp === "no") return false;
+  }
+  if (c.requireInstagram) {
+    if (!p.instagram || !p.instagram.trim()) return false;
+  }
+  return true;
+}
+
+export function formatProspectSummary(
+  found: number,
+  quantity: number,
+  discards: { website?: number; whatsapp?: number; instagram?: number; lead?: number },
+): string {
+  const parts: string[] = [];
+  if (discards.website && discards.website > 0) parts.push(`${discards.website} com site`);
+  if (discards.whatsapp && discards.whatsapp > 0) parts.push(`${discards.whatsapp} sem WhatsApp`);
+  if (discards.instagram && discards.instagram > 0) parts.push(`${discards.instagram} sem Instagram`);
+  if (discards.lead && discards.lead > 0) {
+    parts.push(`${discards.lead} ${discards.lead === 1 ? "já era lead" : "já eram leads"}`);
+  }
+  const base = `Encontradas ${found} de ${quantity}.`;
+  return parts.length > 0 ? `${base} Descartadas: ${parts.join(", ")}.` : base;
+}
 
 /** Pesquisa sem a lista de resultados (para o histórico e para os eventos do painel). */
 export type ProspectSearchSummary = Omit<ProspectSearch, "results"> & { resultCount: number };
@@ -50,10 +110,15 @@ export function summarizeSearch(row: ProspectSearch): ProspectSearchSummary {
 
 // Pesquisas em andamento neste processo (por contexto: os testes sobem vários na mesma execução)
 const controllers = new WeakMap<AppContext, Map<number, AbortController>>();
-// Importação e verificação do WhatsApp regravam a lista de resultados: uma por pesquisa de cada vez
-const busySearches = new WeakMap<AppContext, Map<number, "import" | "whatsapp">>();
+// Importação, verificação do WhatsApp e edição regravam a lista de resultados: uma por pesquisa de cada vez
+const busySearches = new WeakMap<AppContext, Map<number, "import" | "whatsapp" | "edit">>();
 
-async function withSearchLock<T>(ctx: AppContext, id: number, kind: "import" | "whatsapp", fn: () => Promise<T>): Promise<T> {
+async function withSearchLock<T>(
+  ctx: AppContext,
+  id: number,
+  kind: "import" | "whatsapp" | "edit",
+  fn: () => Promise<T>,
+): Promise<T> {
   let busy = busySearches.get(ctx);
   if (!busy) busySearches.set(ctx, (busy = new Map()));
   const current = busy.get(id);
@@ -62,7 +127,9 @@ async function withSearchLock<T>(ctx: AppContext, id: number, kind: "import" | "
       409,
       current === "import"
         ? "Esta importação já está em andamento."
-        : "A verificação do WhatsApp desta prospecção já está em andamento.",
+        : current === "whatsapp"
+        ? "A verificação do WhatsApp desta prospecção já está em andamento."
+        : "Esta prospecção já está sendo editada.",
     );
   }
   busy.set(id, kind);
@@ -87,7 +154,14 @@ function emitUpdated(ctx: AppContext, row: ProspectSearch): void {
 
 /** Resultados gravados antes da verificação do WhatsApp não têm o campo: ausente = não verificado (null). */
 function withDefaults(row: ProspectSearch): ProspectSearch {
-  return { ...row, results: row.results.map((r) => ({ ...r, whatsapp: r.whatsapp ?? null })) };
+  return {
+    ...row,
+    results: row.results.map((r) => ({
+      ...r,
+      bioLink: r.bioLink ?? "",
+      whatsapp: r.whatsapp ?? null,
+    })),
+  };
 }
 
 export async function getProspectSearch(ctx: AppContext, id: number): Promise<ProspectSearch> {
@@ -192,11 +266,13 @@ async function runSearch(
   let lastSaved = 0;
   let latest: ResearchProgress | null = null;
   let timer: NodeJS.Timeout | null = null;
+  let currentRoundPrefix = "";
+
   const flushProgress = () => {
     timer = null;
     if (!latest || controller.signal.aborted) return;
     lastSaved = Date.now();
-    const text = progressText(latest);
+    const text = `${currentRoundPrefix}${progressText(latest)}`;
     latest = null;
     updateIfRunning(ctx, id, { progress: text }).catch((err) =>
       ctx.log.warn({ err: String(err), searchId: id }, "falha ao gravar o andamento da prospecção"),
@@ -210,30 +286,234 @@ async function runSearch(
     else timer = setTimeout(flushProgress, wait);
   };
 
+  const accepted: ProspectResult[] = [];
+  const discardedCompanyNames = new Set<string>();
+  let discardedWebsite = 0;
+  let discardedWhatsapp = 0;
+  let discardedInstagram = 0;
+  let discardedLead = 0;
+  const seenKeys = new Set<string>();
+  const aiNotes: string[] = [];
+  const roundErrors: string[] = [];
+
   try {
     const provider = researchProvider(ctx);
     if (!provider?.research) throw new AiUnavailableError();
     const settings = await getSettings(ctx.db);
-    const out = await provider.research({
-      task: "prospect",
-      system: prospectSystem(settings),
-      prompt: prospectPrompt(criteria),
-      schema: prospectSchema,
-      effort: "medium",
-      signal: controller.signal,
-      onProgress,
-    });
+
+    for (let round = 1; round <= MAX_PROSPECT_ROUNDS; round++) {
+      if (controller.signal.aborted) break;
+      if (accepted.length >= criteria.quantity) break;
+
+      const want = Math.ceil((criteria.quantity - accepted.length) * 1.5);
+
+      // Desde a 1ª rodada: não trazer de novo quem já virou lead numa prospecção anterior
+      let exclude: string[] = [];
+      {
+        const existingLeads = await ctx.db
+          .select({ company: leads.company })
+          .from(leads)
+          .where(
+            and(
+              eq(leads.source, PROSPECT_SOURCE),
+              sql`${leads.company} is not null and ${leads.company} != ''`,
+            ),
+          )
+          .orderBy(desc(leads.id))
+          .limit(200);
+
+        const candidates = [
+          ...accepted.map((a) => a.company),
+          ...discardedCompanyNames,
+          ...existingLeads.map((l) => l.company!),
+        ];
+
+        const seenExcludes = new Set<string>();
+        for (const name of candidates) {
+          const trimmed = name?.trim();
+          if (!trimmed) continue;
+          const key = dedupeKey(trimmed);
+          if (!seenExcludes.has(key)) {
+            seenExcludes.add(key);
+            exclude.push(trimmed);
+            if (exclude.length >= 200) break;
+          }
+        }
+      }
+
+      currentRoundPrefix = `Rodada ${round} de ${MAX_PROSPECT_ROUNDS} · ${accepted.length} de ${criteria.quantity} encontradas · `;
+
+      let out: ProspectOutput;
+      try {
+        out = await provider.research({
+          task: "prospect",
+          system: prospectSystem(settings),
+          prompt: prospectPrompt(criteria, { round, want, exclude }),
+          schema: prospectSchema,
+          effort: "medium",
+          signal: controller.signal,
+          onProgress,
+        });
+      } catch (err) {
+        if (controller.signal.aborted) break;
+        if (round === 1) {
+          throw err;
+        }
+        roundErrors.push(`Erro na rodada ${round}: ${publicErrorMessage(ctx, id, err)}`);
+        break;
+      }
+
+      if (out.notes?.trim()) {
+        aiNotes.push(out.notes.trim());
+      }
+
+      const raw = out.prospects ?? [];
+      const cleaned = raw
+        .map((p) => {
+          const phone = parseProspectPhone(p.phone);
+          return {
+            company: clip(p.company, 200),
+            contactName: clip(p.contactName, 200),
+            phone,
+            rawPhone: clip(p.phone, 100),
+            isMobile: isBrazilianMobile(phone),
+            email: cleanEmail(p.email),
+            website: safeUrl(p.website),
+            bioLink: safeUrl(p.bioLink ?? ""),
+            instagram: instagramUrl(p.instagram),
+            address: clip(p.address, 300),
+            city: clip(p.city, 120),
+            size: clip(p.size, 200),
+            fitReason: clip(p.fitReason, 1000),
+            approach: p.approach.trim().slice(0, 1000),
+            score: Math.max(0, Math.min(100, Math.round(Number.isFinite(p.score) ? p.score : 0))),
+            sources: [...new Set(p.sources.map(safeUrl).filter(Boolean))].slice(0, 10),
+            duplicateLeadId: null as number | null,
+            leadId: null as number | null,
+            whatsapp: null as ProspectWhatsApp | null,
+          };
+        })
+        .filter((p) => p.phone || p.email || p.website || p.instagram)
+        .sort((a, b) => b.score - a.score);
+
+      let newThisRound = 0;
+      for (const candidate of cleaned) {
+        const keys = [
+          candidate.phone && `tel:${candidate.phone}`,
+          candidate.company && `emp:${dedupeKey(candidate.company)}|${dedupeKey(candidate.city)}`,
+        ].filter(Boolean) as string[];
+
+        if (keys.some((k) => seenKeys.has(k))) {
+          continue;
+        }
+        keys.forEach((k) => seenKeys.add(k));
+        newThisRound++;
+
+        // Descarta duplicados de leads existentes no CRM
+        if (candidate.phone) {
+          const existingLead = await findLeadByPhone(ctx.db, candidate.phone);
+          if (existingLead) {
+            candidate.duplicateLeadId = existingLead.id;
+            discardedLead++;
+            if (candidate.company) discardedCompanyNames.add(candidate.company);
+            continue;
+          }
+        }
+
+        // Filtros rígidos configurados pelo usuário
+        if (!passesHardFilters(candidate, criteria)) {
+          if (
+            criteria.excludeWithWebsite &&
+            ((candidate.website && !isAllowedSocialOrWhatsappLink(candidate.website)) ||
+              (candidate.bioLink && !isAllowedSocialOrWhatsappLink(candidate.bioLink)))
+          ) {
+            discardedWebsite++;
+          } else if (
+            criteria.requireWhatsapp &&
+            (!candidate.phone || !candidate.isMobile || candidate.whatsapp === "no")
+          ) {
+            discardedWhatsapp++;
+          } else if (
+            criteria.requireInstagram &&
+            (!candidate.instagram || !candidate.instagram.trim())
+          ) {
+            discardedInstagram++;
+          }
+          if (candidate.company) discardedCompanyNames.add(candidate.company);
+          continue;
+        }
+
+        accepted.push(candidate);
+      }
+
+      // Com "Só com WhatsApp", confere já nesta rodada: quem não tem abre vaga para a próxima rodada buscar mais
+      if (criteria.requireWhatsapp && ctx.wa.checkNumber && !controller.signal.aborted) {
+        const unchecked = accepted.filter((r) => r.whatsapp == null && r.phone);
+        if (unchecked.length > 0) {
+          await updateIfRunning(ctx, id, { progress: `${currentRoundPrefix}conferindo quem tem WhatsApp…` });
+          const checked = await checkProspectsWhatsApp(ctx, unchecked, { signal: controller.signal });
+          const byPhone = new Map(checked.map((r) => [r.phone, r.whatsapp ?? null]));
+          for (let i = accepted.length - 1; i >= 0; i--) {
+            const r = accepted[i]!;
+            const value = byPhone.get(r.phone);
+            if (value === undefined) continue;
+            r.whatsapp = value;
+            if (value === "no") {
+              accepted.splice(i, 1);
+              discardedWhatsapp++;
+              if (r.company) discardedCompanyNames.add(r.company);
+            }
+          }
+        }
+      }
+
+      if (newThisRound === 0) {
+        break;
+      }
+    }
+
     if (timer) clearTimeout(timer);
-    let results = await processProspects(ctx, out.prospects, criteria.quantity);
+    if (controller.signal.aborted) {
+      await updateIfRunning(ctx, id, { status: "canceled", progress: null, finishedAt: ctx.now() });
+      return;
+    }
+
+    // Ordena aceitos por score
+    accepted.sort((a, b) => b.score - a.score);
+
+    let results = accepted;
     // Confere quem tem WhatsApp antes de mostrar (falhas e demora não derrubam a pesquisa)
     if (ctx.wa.checkNumber && results.some((r) => r.phone) && !controller.signal.aborted) {
       await updateIfRunning(ctx, id, { progress: "Conferindo quem tem WhatsApp…" });
       results = await checkProspectsWhatsApp(ctx, results, { signal: controller.signal });
     }
+
+    if (criteria.requireWhatsapp) {
+      const before = results.length;
+      results = results.filter((r) => r.whatsapp !== "no");
+      discardedWhatsapp += before - results.length;
+    }
+
+    results = results.slice(0, criteria.quantity);
+
+    const summaryText = formatProspectSummary(results.length, criteria.quantity, {
+      website: discardedWebsite,
+      whatsapp: discardedWhatsapp,
+      instagram: discardedInstagram,
+      lead: discardedLead,
+    });
+
+    const uniqueNotes: string[] = [];
+    for (const note of aiNotes) {
+      if (!uniqueNotes.includes(note)) uniqueNotes.push(note);
+    }
+    const allNotes = [...uniqueNotes, ...roundErrors].filter(Boolean).join("\n\n").trim();
+    const finalProgress = allNotes ? `${allNotes}\n\n${summaryText}` : summaryText;
+
     await updateIfRunning(ctx, id, {
       status: "done",
       results,
-      progress: out.notes.trim().slice(0, 2000) || null,
+      progress: finalProgress.slice(0, 2000) || null,
       finishedAt: ctx.now(),
     });
   } catch (err) {
@@ -340,6 +620,7 @@ export async function processProspects(
   ctx: AppContext,
   prospects: ProspectOutput["prospects"],
   quantity: number,
+  criteria?: ProspectCriteria,
 ): Promise<ProspectResult[]> {
   const cleaned = prospects
     .map((p) => {
@@ -352,6 +633,7 @@ export async function processProspects(
         isMobile: isBrazilianMobile(phone),
         email: cleanEmail(p.email),
         website: safeUrl(p.website),
+        bioLink: safeUrl(p.bioLink ?? ""),
         instagram: instagramUrl(p.instagram),
         address: clip(p.address, 300),
         city: clip(p.city, 120),
@@ -378,13 +660,16 @@ export async function processProspects(
     if (keys.some((k) => seen.has(k))) continue;
     keys.forEach((k) => seen.add(k));
     unique.push(p);
-    if (unique.length >= quantity) break;
   }
 
   for (const p of unique) {
     if (p.phone) p.duplicateLeadId = (await findLeadByPhone(ctx.db, p.phone))?.id ?? null;
   }
-  return unique;
+  let filtered = unique.filter((p) => p.duplicateLeadId == null);
+  if (criteria) {
+    filtered = filtered.filter((p) => passesHardFilters(p, criteria));
+  }
+  return filtered.slice(0, quantity);
 }
 
 // ---- Conferir quem tem WhatsApp ----
@@ -624,5 +909,115 @@ export async function importProspects(
     }
 
     return out;
+  });
+}
+
+// ---- Editar e remover resultado ----
+
+export interface UpdateProspectResultInput {
+  company?: string;
+  contactName?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+  instagram?: string;
+  city?: string;
+  approach?: string;
+}
+
+export async function updateProspectResult(
+  ctx: AppContext,
+  id: number,
+  index: number,
+  patch: UpdateProspectResultInput,
+): Promise<ProspectResult> {
+  return withSearchLock(ctx, id, "edit", async () => {
+    const search = await getProspectSearch(ctx, id);
+    if (search.status === "running") {
+      throw new HttpError(409, "Esta prospecção ainda está em andamento.");
+    }
+    const target = search.results[index];
+    if (!target) {
+      throw new HttpError(404, "Resultado não encontrado.");
+    }
+    if (target.leadId != null) {
+      throw new HttpError(409, "Esse resultado já foi importado.");
+    }
+
+    const updated: ProspectResult = { ...target };
+
+    if (patch.company !== undefined) updated.company = clip(patch.company, 200);
+    if (patch.contactName !== undefined) updated.contactName = clip(patch.contactName, 200);
+    if (patch.city !== undefined) updated.city = clip(patch.city, 120);
+    if (patch.approach !== undefined) updated.approach = patch.approach.trim().slice(0, 1000);
+    if (patch.email !== undefined) updated.email = cleanEmail(patch.email);
+    if (patch.website !== undefined) updated.website = safeUrl(patch.website);
+    if (patch.instagram !== undefined) updated.instagram = instagramUrl(patch.instagram);
+
+    if (patch.phone !== undefined) {
+      const raw = patch.phone.trim();
+      if (!raw) {
+        updated.phone = "";
+        updated.rawPhone = "";
+        updated.isMobile = false;
+        updated.whatsapp = null;
+        updated.duplicateLeadId = null;
+      } else {
+        const parsed = parseProspectPhone(patch.phone);
+        if (!parsed) {
+          throw new HttpError(400, "Telefone inválido.");
+        }
+        const oldPhone = updated.phone;
+        updated.rawPhone = clip(patch.phone, 100);
+        updated.phone = parsed;
+        updated.isMobile = isBrazilianMobile(parsed);
+        if (parsed !== oldPhone) {
+          updated.whatsapp = null;
+        }
+        updated.duplicateLeadId = (await findLeadByPhone(ctx.db, parsed))?.id ?? null;
+      }
+    }
+
+    const newResults = search.results.map((r, i) => (i === index ? updated : r));
+
+    const [row] = await ctx.db
+      .update(prospectSearches)
+      .set({ results: newResults })
+      .where(eq(prospectSearches.id, id))
+      .returning();
+    if (!row) throw new HttpError(404, "Prospecção não encontrada.");
+    emitUpdated(ctx, row);
+
+    return updated;
+  });
+}
+
+export async function deleteProspectResult(
+  ctx: AppContext,
+  id: number,
+  index: number,
+): Promise<void> {
+  return withSearchLock(ctx, id, "edit", async () => {
+    const search = await getProspectSearch(ctx, id);
+    if (search.status === "running") {
+      throw new HttpError(409, "Esta prospecção ainda está em andamento.");
+    }
+    const target = search.results[index];
+    if (!target) {
+      throw new HttpError(404, "Resultado não encontrado.");
+    }
+    if (target.leadId != null) {
+      throw new HttpError(409, "Esse resultado já foi importado.");
+    }
+
+    const newResults = search.results.filter((_, i) => i !== index);
+
+    const [row] = await ctx.db
+      .update(prospectSearches)
+      .set({ results: newResults })
+      .where(eq(prospectSearches.id, id))
+      .returning();
+    if (!row) throw new HttpError(404, "Prospecção não encontrada.");
+    emitUpdated(ctx, row);
   });
 }

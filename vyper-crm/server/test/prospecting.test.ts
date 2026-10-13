@@ -43,6 +43,7 @@ function prospect(over: Record<string, unknown> = {}) {
     email: "",
     website: "",
     instagram: "",
+    bioLink: "",
     address: "",
     city: "São Paulo",
     size: "pequena",
@@ -58,7 +59,12 @@ function prospect(over: Record<string, unknown> = {}) {
 function pendingResearch() {
   let finish: (value: unknown) => void = () => {};
   env.claude.researchHandler = () => new Promise((resolve) => (finish = resolve));
-  return { finish: (value: unknown) => finish(value) };
+  return {
+    finish: (value: unknown) => {
+      env.claude.researchHandler = () => ({ prospects: [], notes: "" });
+      finish(value);
+    },
+  };
 }
 
 async function startSearch(payload: Record<string, unknown> = criteria) {
@@ -123,7 +129,7 @@ describe("prospecção com IA", () => {
     const search = await getSearch(started.id);
     expect(search.status).toBe("done");
     expect(search.finishedAt).toBeTruthy();
-    expect(search.progress).toBe("Poucas clínicas com WhatsApp no site.");
+    expect(search.progress).toBe("Poucas clínicas com WhatsApp no site.\n\nEncontradas 3 de 10. Descartadas: 1 já era lead.");
 
     const call = env.claude.calls.find((c) => c.task === "prospect")!;
     expect(call.prompt).toContain("clínicas odontológicas");
@@ -136,7 +142,6 @@ describe("prospecção com IA", () => {
     expect(search.results.map((r: { company: string }) => r.company)).toEqual([
       "Dental F",
       "Clínica Sorriso",
-      "Odonto Center",
       "Odonto X",
     ]);
     expect(byCompany["Dental F"]).toMatchObject({
@@ -153,7 +158,7 @@ describe("prospecção com IA", () => {
       isMobile: true,
       contactName: "Dra. Ana",
     });
-    expect(byCompany["Odonto Center"]).toMatchObject({ phone: "5511977776666", duplicateLeadId: existing.id });
+    expect(byCompany["Odonto Center"]).toBeUndefined();
     expect(byCompany["Odonto X"]).toMatchObject({
       phone: "",
       rawPhone: "0800 123 4567",
@@ -166,7 +171,7 @@ describe("prospecção com IA", () => {
     // Histórico sem a lista de resultados, mas com a contagem
     const list = (await app.inject({ method: "GET", url: "/api/prospecting/searches", headers: auth() })).json();
     expect(list).toHaveLength(1);
-    expect(list[0]).toMatchObject({ id: started.id, status: "done", resultCount: 4 });
+    expect(list[0]).toMatchObject({ id: started.id, status: "done", resultCount: 3 });
     expect(list[0].results).toBeUndefined();
 
     // Evento só do painel: não vai para o n8n
@@ -189,8 +194,8 @@ describe("prospecção com IA", () => {
     await new Promise((r) => setTimeout(r, 10));
     report!({ searches: 1, fetches: 0, lastAction: "clínicas odontológicas Pinheiros" });
     await new Promise((r) => setTimeout(r, 50));
-    expect((await getSearch(id)).progress).toBe("1 busca, 0 páginas lidas — última: clínicas odontológicas Pinheiros");
-    expect(updates).toContain("1 busca, 0 páginas lidas — última: clínicas odontológicas Pinheiros");
+    expect((await getSearch(id)).progress).toBe("Rodada 1 de 3 · 0 de 10 encontradas · 1 busca, 0 páginas lidas — última: clínicas odontológicas Pinheiros");
+    expect(updates).toContain("Rodada 1 de 3 · 0 de 10 encontradas · 1 busca, 0 páginas lidas — última: clínicas odontológicas Pinheiros");
     pending.finish({ prospects: [], notes: "" });
     await env.settle();
     expect((await getSearch(id)).status).toBe("done");
@@ -289,11 +294,6 @@ describe("prospecção com IA", () => {
     // Automação de boas-vindas ativa: leads comuns entram, prospectados não
     const [welcome] = await env.ctx.db.select().from(sequences).where(eq(sequences.trigger, "lead_created"));
     await env.ctx.db.update(sequences).set({ active: true }).where(eq(sequences.id, welcome!.id));
-    const existing = (
-      await app.inject({ method: "POST", url: "/api/leads", headers: auth(), payload: { phone: "11977776666", source: "formulario" } })
-    ).json();
-    expect(await env.ctx.db.select().from(enrollments).where(eq(enrollments.leadId, existing.id))).toHaveLength(1);
-
     const search = await finishedSearch([
       prospect({
         company: "Clínica Sorriso",
@@ -314,7 +314,11 @@ describe("prospecção com IA", () => {
       "Dental Mail",
       "Só Site",
     ]);
-    expect(search.results[1].duplicateLeadId).toBe(existing.id);
+
+    const existing = (
+      await app.inject({ method: "POST", url: "/api/leads", headers: auth(), payload: { phone: "11977776666", source: "formulario" } })
+    ).json();
+    expect(await env.ctx.db.select().from(enrollments).where(eq(enrollments.leadId, existing.id))).toHaveLength(1);
 
     const stages = (await app.inject({ method: "GET", url: "/api/stages", headers: auth() })).json();
     const qualificando = stages.find((s: { name: string }) => s.name === "Qualificando");
@@ -516,20 +520,10 @@ describe("prospecção com IA", () => {
   });
 
   it("import com firstMessage cria scheduled_messages espaçados com author automation e variáveis substituídas; leads já existentes não recebem", async () => {
-    // 1. Cria um lead que já existe no CRM
-    const existing = (
-      await app.inject({
-        method: "POST",
-        url: "/api/leads",
-        headers: auth(),
-        payload: { name: "Carlos Antigo", company: "Empresa Antiga", phone: "(11) 97777-6666" },
-      })
-    ).json();
-
-    // 2. Pesquisa finalizada com:
+    // 1. Pesquisa finalizada com:
     // Prospect 0: novo com celular, nome e empresa
     // Prospect 1: novo com celular e empresa, sem nome pessoal
-    // Prospect 2: número do lead que já existe
+    // Prospect 2: número do lead que vai existir
     // Prospect 3: só e-mail (vira lead, mas sem telefone -> scheduleFirstMessages pula)
     const search = await finishedSearch([
       prospect({
@@ -550,6 +544,16 @@ describe("prospecção com IA", () => {
         email: "contato@dentalmail.com.br",
       }),
     ]);
+
+    // 2. Cria um lead que já existe no CRM
+    const existing = (
+      await app.inject({
+        method: "POST",
+        url: "/api/leads",
+        headers: auth(),
+        payload: { name: "Carlos Antigo", company: "Empresa Antiga", phone: "(11) 97777-6666" },
+      })
+    ).json();
 
     // Validação: firstMessage com send: true e texto vazio retorna 400
     const badRes = await app.inject({
